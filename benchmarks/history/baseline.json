@@ -1,0 +1,30 @@
+{
+    "recorded_at": "2026-06-24T14:35:21+00:00",
+    "note": "median seed from five clean sequential runs \u2014 median of 5 clean sequential runs",
+    "sizes": {
+        "1000": {
+            "lookup_warm_p95_us": 2.01,
+            "update_p95_us": 3.034,
+            "insert_p95_us": 10.406
+        },
+        "10000": {
+            "lookup_warm_p95_us": 2.046,
+            "update_p95_us": 3.19,
+            "insert_p95_us": 9.627
+        },
+        "25000": {
+            "lookup_warm_p95_us": 2.114,
+            "update_p95_us": 3.253,
+            "insert_p95_us": 9.422
+        }
+    },
+    "kind": "best_floor",
+    "gate": {
+        "sizes": [
+            1000
+        ],
+        "tolerance_pct": {
+            "latency": 5
+        }
+    }
+}

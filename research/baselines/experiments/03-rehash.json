@@ -1,0 +1,64 @@
+{
+    "schema": "fast-exp3\/1",
+    "captured": "2026-06-28T00:08:33+00:00",
+    "params": {
+        "START": 1000,
+        "TARGET": 1000000,
+        "B": 8,
+        "READS": 4,
+        "K": 4,
+        "GROW": 0.9,
+        "SHRINK": 0.2,
+        "DRAIN": true
+    },
+    "results": [
+        {
+            "mode": "stop-world",
+            "maxMoved": 512410,
+            "p99Moved": 0,
+            "avgMoved": 0.7391270635317659,
+            "totalMoved": 1477515,
+            "rehashAmp": 1.477515,
+            "readsPerLookup": 1,
+            "peakBuckets": 142336,
+            "peakTableMiB": 8.6875,
+            "growBuckets": 142336
+        },
+        {
+            "mode": "incremental-K1",
+            "maxMoved": 45548,
+            "p99Moved": 8,
+            "avgMoved": 0.7389954549842372,
+            "totalMoved": 1477498,
+            "rehashAmp": 1.477498,
+            "readsPerLookup": 1.184559779889945,
+            "peakBuckets": 213504,
+            "peakTableMiB": 13.03125,
+            "growBuckets": 142336
+        },
+        {
+            "mode": "incremental-K4",
+            "maxMoved": 29,
+            "p99Moved": 29,
+            "avgMoved": 0.7391185592796399,
+            "totalMoved": 1477498,
+            "rehashAmp": 1.477498,
+            "readsPerLookup": 1.0532466233116557,
+            "peakBuckets": 213504,
+            "peakTableMiB": 13.03125,
+            "growBuckets": 142336
+        },
+        {
+            "mode": "incremental-K16",
+            "maxMoved": 116,
+            "p99Moved": 25,
+            "avgMoved": 0.7391185592796399,
+            "totalMoved": 1477498,
+            "rehashAmp": 1.477498,
+            "readsPerLookup": 1.013312656328164,
+            "peakBuckets": 213504,
+            "peakTableMiB": 13.03125,
+            "growBuckets": 142336
+        }
+    ]
+}

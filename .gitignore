@@ -1,0 +1,8 @@
+/vendor/
+.cursor
+composer.lock
+phpcs.phar
+/benchmarks/results/
+/benchmarks/reports/
+/tests/results/
+/.phpunit.cache/

@@ -1,0 +1,116 @@
+<?php declare(strict_types = 1);
+
+/**
+ * Test-only engine introspection helpers for contract tests.
+ *
+ * The public Fast surface deliberately exposes no engine internals. Tests that
+ * must still assert on internal mechanism reach it here via reflection / engine
+ * probes rather than forcing those capabilities back onto the public Fast class.
+ * Behavioral assertions should prefer the public surface (count, isset, values,
+ * foreach, close/destroy).
+ *
+ * The engine is Fast\Engine\Flat; segment existence/counting is probed through
+ * Flat's own segment-key derivation so these helpers cannot drift from how Fast
+ * actually keys its shared-memory segments.
+ */
+
+namespace Fast;
+
+use \Fast;
+use Fast\Engine\Flat;
+
+/**
+ * Test-only diagnostics snapshot.
+ *
+ * stats() is NOT part of the public Fast contract — it is private engine
+ * introspection debt. Tests reach it here via reflection rather than forcing a
+ * public diagnostics method onto Fast.
+ *
+ * @return array<string,mixed>
+ */
+function fast_test_stats(Fast $store): array
+{
+    static $method = null;
+    if ($method === null) {
+        $method = new \ReflectionMethod(\Fast::class, 'stats');
+        $method->setAccessible(true);
+    }
+
+    /** @var array<string,mixed> $stats */
+    $stats = $method->invoke($store);
+    return $stats;
+}
+
+/**
+ * Test-only attach-existing-only open.
+ *
+ * The public constructor (`new \Fast('name')`) is open-or-create. Some lifecycle
+ * tests must instead prove a store is GONE (reclaimed or destroyed), which needs
+ * fail-if-missing semantics — a test-only capability:
+ *
+ *   existing store -> returns an attached handle
+ *   missing store  -> throws RuntimeException
+ */
+function fast_test_open_existing(string $name): Fast
+{
+    if (!fast_test_shared_segment_exists($name, 0)) {
+        throw new \RuntimeException('cannot attach: shared Fast store "' . $name . '" does not exist');
+    }
+
+    return new \Fast($name);
+}
+
+/**
+ * Test-only storage maintenance trigger. compact() is internal engine
+ * maintenance, not public Fast contract; reached here via reflection.
+ */
+function fast_test_compact(Fast $store): void
+{
+    static $method = null;
+    if ($method === null) {
+        $method = new \ReflectionMethod(\Fast::class, 'compact');
+        $method->setAccessible(true);
+    }
+
+    $method->invoke($store);
+}
+
+/**
+ * Test-only shared-segment existence probe, keyed exactly as the engine keys its
+ * segments.
+ */
+function fast_test_shared_segment_exists(string $name, int $index): bool
+{
+    $seg = @\shmop_open(Flat::segKey($name, $index), 'a', 0600, 0);
+    if ($seg === false) {
+        return false;
+    }
+    // shmop handles are auto-closed at request end; no shmop_close needed here.
+    return true;
+}
+
+/**
+ * Test-only count of a store's contiguous shared-memory segments (segment 0 up to
+ * the first absent key), bounded by the engine maximum. Returns 0 when absent.
+ */
+function fast_test_shared_segment_count(string $name): int
+{
+    $count = 0;
+    for ($i = 0; $i < Flat::MAX_SEGMENTS; $i++) {
+        if (!fast_test_shared_segment_exists($name, $i)) {
+            break;
+        }
+        $count++;
+    }
+
+    return $count;
+}
+
+/**
+ * Test-only capability probe. Shared mode requires shmop + sysvsem; shared-mode
+ * tests gate themselves on this instead of a public Fast capability method.
+ */
+function fast_test_supports_shared_memory(): bool
+{
+    return \extension_loaded('shmop') && \extension_loaded('sysvsem');
+}

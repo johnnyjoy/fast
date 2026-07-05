@@ -1,0 +1,38 @@
+{
+    "name": "johnnyjoy/fast",
+    "description": "Array-like shared-memory store for PHP",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": "^8.3",
+        "ext-igbinary": "*",
+        "ext-shmop": "*",
+        "ext-sysvsem": "*"
+    },
+    "suggest": {
+        "ext-pcntl": "Required for multi-process tests and benchmarks"
+    },
+    "autoload": {
+        "psr-4": {
+            "Fast\\": "src/"
+        },
+        "classmap": [
+            "src/Fast.php"
+        ]
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Bench\\": "benchmarks/lib/",
+            "Matrix\\": "tests/"
+        }
+    },
+    "require-dev": {
+        "squizlabs/php_codesniffer": "^3.10"
+    },
+    "scripts": {
+        "test": "php tests/run.php",
+        "bench:compare": "php benchmarks/compare-engines.php",
+        "lint:docs": "phpcs --standard=phpcs.xml.dist",
+        "lint": "@lint:docs"
+    }
+}

@@ -1,0 +1,77 @@
+{
+    "schema": "fast-baseline/1",
+    "captured_utc": "2026-06-28T20:39:17+00:00",
+    "php_version": "8.1.2-1ubuntu2.24",
+    "os": "Linux 7.0.11-76070011-generic",
+    "seed": 1,
+    "read_iters": 50000,
+    "sizes": [
+        100000
+    ],
+    "values": [
+        0
+    ],
+    "modes": [
+        "shared"
+    ],
+    "rows": [
+        {
+            "mode": "shared",
+            "n": 100000,
+            "value_bytes": 0,
+            "insert": {
+                "ops_per_sec": 48681,
+                "p50": 18071,
+                "p95": 23927,
+                "p99": 26752
+            },
+            "footprint_full": {
+                "segment_bytes": 67108864,
+                "arena_frontier": 4688922,
+                "free_bytes": 0,
+                "live_bytes_est": 4688922,
+                "live_count": 100000,
+                "grown_segments": 0,
+                "utilization": 1
+            },
+            "read": {
+                "ops_per_sec": 193462,
+                "p50": 3809,
+                "p95": 4970,
+                "p99": 6578
+            },
+            "isset": {
+                "ops_per_sec": 240914,
+                "p50": 2832,
+                "p95": 3824,
+                "p99": 5085
+            },
+            "update_same": {
+                "ops_per_sec": 55554,
+                "p50": 16571,
+                "p95": 18565,
+                "p99": 20756
+            },
+            "foreach": {
+                "ops_per_sec": 431823,
+                "per_elem_ns": 2315.7624,
+                "counted": 100000
+            },
+            "delete_half": {
+                "ops_per_sec": 63251,
+                "p50": 15604,
+                "p95": 16998,
+                "p99": 19173
+            },
+            "footprint_after_delete": {
+                "segment_bytes": 67108864,
+                "arena_frontier": 4688922,
+                "free_bytes": 2338890,
+                "live_bytes_est": 2350032,
+                "live_count": 50000,
+                "grown_segments": 0,
+                "utilization": 0.5012
+            }
+        }
+    ]
+}

@@ -1,0 +1,72 @@
+{
+    "schema": "fast-exp4\/1",
+    "captured": "2026-06-28T00:16:58+00:00",
+    "A": {
+        "pass": true,
+        "trials": 300,
+        "killedMidWrite": 54,
+        "verdicts": {
+            "inprogress": 54,
+            "ok": 246,
+            "crc": 0,
+            "torn": 0
+        },
+        "leaks": 0,
+        "live": {
+            "reads": 923921,
+            "ok": 486365,
+            "retry": 437556
+        }
+    },
+    "B": {
+        "pass": true,
+        "nonPersistent": {
+            "trace": [
+                {
+                    "stage": "created+parent-attached",
+                    "nattch": 1
+                },
+                {
+                    "stage": "forked 3 holders",
+                    "nattch": 4
+                },
+                {
+                    "stage": "IPC_RMID set (marked dest)",
+                    "nattch": 4
+                },
+                {
+                    "stage": "parent detached",
+                    "nattch": 3
+                },
+                {
+                    "stage": "all holders kill -9 reaped",
+                    "nattch": -1
+                }
+            ],
+            "final": -1,
+            "reclaimed": true
+        },
+        "persistent": {
+            "trace": [
+                {
+                    "stage": "created+parent-attached",
+                    "nattch": 1
+                },
+                {
+                    "stage": "forked 3 holders",
+                    "nattch": 4
+                },
+                {
+                    "stage": "parent detached",
+                    "nattch": 3
+                },
+                {
+                    "stage": "all holders kill -9 reaped",
+                    "nattch": 0
+                }
+            ],
+            "final": 0,
+            "reclaimed": false
+        }
+    }
+}

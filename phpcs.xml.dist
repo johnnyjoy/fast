@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<ruleset name="fast-store-docs">
+    <description>
+        Public API PHPDoc for johnnyjoy/fast (phpDocumentor-compatible: summary, @param, @return).
+        File headers follow project convention (@package, @copyright, @license, @link).
+    </description>
+
+    <file>src</file>
+
+    <exclude-pattern>*/vendor/*</exclude-pattern>
+
+    <arg value="p"/>
+    <arg name="colors"/>
+
+    <!-- Every class/interface documents its role and package. -->
+    <rule ref="Squiz.Commenting.ClassComment">
+        <exclude name="Squiz.Commenting.ClassComment.TagNotAllowed"/>
+    </rule>
+
+    <!-- Every public method: summary, @param, @return (including void). -->
+    <rule ref="Squiz.Commenting.FunctionComment">
+        <properties>
+            <property name="minimumVisibility" value="public"/>
+            <property name="requiredTags" type="array">
+                <element value="@param"/>
+                <element value="@return"/>
+            </property>
+        </properties>
+        <exclude name="Squiz.Commenting.FunctionComment.SpacingAfter"/>
+        <exclude name="Squiz.Commenting.FunctionComment.ParamCommentFullStop"/>
+        <exclude name="Squiz.Commenting.FunctionComment.ThrowsNotCapital"/>
+        <exclude name="Squiz.Commenting.FunctionComment.EmptyThrows"/>
+        <exclude name="Squiz.Commenting.FunctionComment.IncorrectParamVarName"/>
+        <exclude name="Squiz.Commenting.FunctionComment.SpacingAfterParamName"/>
+        <exclude name="Squiz.Commenting.FunctionComment.ParamNameNoMatch"/>
+    </rule>
+    <rule ref="Squiz.Commenting.FunctionComment.InvalidReturn">
+        <severity>0</severity>
+    </rule>
+    <rule ref="Squiz.Commenting.FunctionComment.InvalidParam">
+        <severity>0</severity>
+    </rule>
+</ruleset>
