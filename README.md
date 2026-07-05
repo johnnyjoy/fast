@@ -76,6 +76,12 @@ composer bench:compare   # Flat vs Striped on the same workloads (needs pcntl)
 | [`docs/specification.md`](docs/specification.md) | Behavior contract |
 | [`docs/README.md`](docs/README.md) | Full doc index |
 
+## Using Fast with AI assistants
+
+The [`skills/`](skills/) directory is for **consumers** — copy it into your app
+(or reference it from `vendor/johnnyjoy/fast/skills/`) so Cursor and other agents
+know how to use `\Fast` correctly. Start with [`skills/fast/SKILL.md`](skills/fast/SKILL.md).
+
 Public API PHPDoc is enforced on `src/` via `composer lint`.
 
 ## Validation
