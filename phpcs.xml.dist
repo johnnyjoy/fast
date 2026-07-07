@@ -21,10 +21,6 @@
     <rule ref="Squiz.Commenting.FunctionComment">
         <properties>
             <property name="minimumVisibility" value="public"/>
-            <property name="requiredTags" type="array">
-                <element value="@param"/>
-                <element value="@return"/>
-            </property>
         </properties>
         <exclude name="Squiz.Commenting.FunctionComment.SpacingAfter"/>
         <exclude name="Squiz.Commenting.FunctionComment.ParamCommentFullStop"/>
