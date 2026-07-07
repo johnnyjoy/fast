@@ -48,6 +48,11 @@ $fail = static function (string $message): never {
     exit(1);
 };
 
+if (\extension_loaded('fast')) {
+    echo 'shared crash reclaim ok (skipped: ext-native grows via mmap, not multi-segment shmop)' . PHP_EOL;
+    exit(0);
+}
+
 // Small segments so a modest payload forces growth past segment 0 quickly.
 $name = 'fast-store-crash-' . \getmypid();
 $size = 65536;

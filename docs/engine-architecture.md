@@ -1,9 +1,14 @@
 # How Fast stores data
 
-This note describes the current engine: `Flat` for a single store, `Striped` when
-you turn on write concurrency. It is written for someone reading the code or trying
-to reason about behavior. The public contract lives in `specification.md`; this
-file is about bytes, locks, and memory.
+This document explains **where bytes live** and **how locks work**. You do not
+need it to use Fast day to day.
+
+Read [`specification.md`](specification.md) for public behavior. Read this file
+when you are debugging storage, crash recovery, or comparing the PHP engine to
+ext-fast.
+
+**In one sentence:** Fast keeps a hash table in shared memory and exposes it as a
+PHP array; reads and writes copy data between PHP and that memory.
 
 The layout version is `LAYOUT = 1` in `Flat.php`. If that number changes, this
 document and the on-disk format change together.

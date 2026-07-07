@@ -10,14 +10,15 @@
         "ext-sysvsem": "*"
     },
     "suggest": {
-        "ext-pcntl": "Required for multi-process tests and benchmarks"
+        "ext-pcntl": "Required for multi-process tests and benchmarks",
+        "ext-fast": "Native Fast engine (optional compile from ext/fast or PECL)"
     },
     "autoload": {
         "psr-4": {
             "Fast\\": "src/"
         },
-        "classmap": [
-            "src/Fast.php"
+        "files": [
+            "src/fast-autoload.php"
         ]
     },
     "autoload-dev": {

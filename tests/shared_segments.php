@@ -23,6 +23,11 @@ $fail = static function (string $message): never {
     exit(1);
 };
 
+if (\extension_loaded('fast')) {
+    echo 'shared segments ok (skipped: ext-native grows via mmap, not multi-segment shmop)' . PHP_EOL;
+    exit(0);
+}
+
 $name = 'fast-store-dynamic-' . \bin2hex(\random_bytes(8));
 $size = 65536;          // small segments so a modest volume forces growth
 $writer = new \Fast([

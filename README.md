@@ -59,6 +59,8 @@ $store = new Fast(['name' => 'workers', 'persistent' => true, 'stripes' => 8]);
 composer require johnnyjoy/fast
 ```
 
+Optional native engine (Linux x86_64, PHP 8.3+): compile [`ext/fast`](ext/fast/) or see [`docs/extension-install.md`](docs/extension-install.md). When the extension is loaded it owns class `\Fast`.
+
 For local development:
 
 ```bash
@@ -74,6 +76,7 @@ composer bench:compare   # Flat vs Striped on the same workloads (needs pcntl)
 | [`docs/performance.md`](docs/performance.md) | Measured Flat vs Striped, how to reproduce |
 | [`docs/engine-architecture.md`](docs/engine-architecture.md) | How storage and locks work |
 | [`docs/specification.md`](docs/specification.md) | Behavior contract |
+| [`docs/extension-install.md`](docs/extension-install.md) | Optional ext-fast build, PECL, CI |
 | [`docs/README.md`](docs/README.md) | Full doc index |
 
 ## Using Fast with AI assistants

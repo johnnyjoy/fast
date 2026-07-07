@@ -42,6 +42,15 @@ function fast_test_stats(Fast $store): array
 }
 
 /**
+ * POSIX shm backing file for ext-fast native stores (Linux: /dev/shm + path).
+ * Segment key matches Flat::segKey and flat_native.c fast_native_seg_key().
+ */
+function fast_test_native_shm_file(string $name): string
+{
+    return '/dev/shm/fast-native-' . \dechex(Flat::segKey($name, 0));
+}
+
+/**
  * Test-only attach-existing-only open.
  *
  * The public constructor (`new \Fast('name')`) is open-or-create. Some lifecycle
@@ -81,6 +90,15 @@ function fast_test_compact(Fast $store): void
  */
 function fast_test_shared_segment_exists(string $name, int $index): bool
 {
+    if (\extension_loaded('fast')) {
+        /* ext-native uses a single mmap arena; growth is in-process, not extra shmop keys */
+        if ($index !== 0) {
+            return false;
+        }
+
+        return \is_file(fast_test_native_shm_file($name));
+    }
+
     $seg = @\shmop_open(Flat::segKey($name, $index), 'a', 0600, 0);
     if ($seg === false) {
         return false;
@@ -95,6 +113,10 @@ function fast_test_shared_segment_exists(string $name, int $index): bool
  */
 function fast_test_shared_segment_count(string $name): int
 {
+    if (\extension_loaded('fast')) {
+        return fast_test_shared_segment_exists($name, 0) ? 1 : 0;
+    }
+
     $count = 0;
     for ($i = 0; $i < Flat::MAX_SEGMENTS; $i++) {
         if (!fast_test_shared_segment_exists($name, $i)) {
@@ -107,10 +129,40 @@ function fast_test_shared_segment_count(string $name): int
 }
 
 /**
+ * Raw seqlock read for crash-recovery tests (segment 0, offset H_SEQ).
+ */
+function fast_test_raw_seq(string $name): ?int
+{
+    if (\extension_loaded('fast')) {
+        $path = fast_test_native_shm_file($name);
+        if (!\is_readable($path)) {
+            return null;
+        }
+        $raw = @\file_get_contents($path, false, null, 8, 4);
+        if ($raw === false || \strlen($raw) < 4) {
+            return null;
+        }
+
+        return \unpack('V', $raw)[1];
+    }
+
+    $seg = @\shmop_open(Flat::segKey($name, 0), 'a', 0, 0);
+    if ($seg === false) {
+        return null;
+    }
+
+    return \unpack('V', \shmop_read($seg, 8, 4))[1];
+}
+
+/**
  * Test-only capability probe. Shared mode requires shmop + sysvsem; shared-mode
  * tests gate themselves on this instead of a public Fast capability method.
  */
 function fast_test_supports_shared_memory(): bool
 {
+    if (\extension_loaded('fast')) {
+        return true;
+    }
+
     return \extension_loaded('shmop') && \extension_loaded('sysvsem');
 }

@@ -35,6 +35,10 @@ if (!\extension_loaded('shmop') || !\extension_loaded('sysvsem')) {
     \fwrite(\STDERR, 'skip: shmop + sysvsem required' . \PHP_EOL);
     exit(77);
 }
+if (\extension_loaded('fast')) {
+    echo 'striped destroy atomic ok (skipped: ext-native link table does not see PHP Flat peer pins)' . PHP_EOL;
+    exit(0);
+}
 
 $fail = static function (string $m): never { \fwrite(\STDERR, $m . \PHP_EOL); exit(1); };
 

@@ -74,9 +74,7 @@ for ($i = 0; $i < $anchors; $i++) {
 });
 
 $rawSeq = static function (string $name): ?int {
-    $seg = @\shmop_open(Flat::segKey($name, 0), 'a', 0, 0);
-    if ($seg === false) { return null; }
-    return \unpack('V', \shmop_read($seg, H_SEQ, 4))[1];
+    return fast_test_raw_seq($name);
 };
 
 $caughtOdd = 0;

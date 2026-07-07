@@ -1,9 +1,18 @@
 # Fast Specification
 
 Status: authoritative contract for `\Fast`.
+
 This file defines **what Fast is and how it must behave**. Tests encode this
 contract. When a test and this spec disagree, one of them is wrong — fix the
 disagreement deliberately, do not paper over it.
+
+### How to read this document
+
+- **New to Fast?** Read §0 (mission), §1 (what it is), user stories, and the
+  configuration table. That is enough to use the library correctly.
+- **Implementing or debugging?** Read the full document.
+- **Looking for install or Docker?** See [`extension-install.md`](extension-install.md).
+- **Flat vs Striped?** See [`performance.md`](performance.md).
 
 ---
 

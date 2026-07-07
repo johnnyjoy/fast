@@ -9,6 +9,7 @@
 namespace Fast;
 
 require __DIR__ . '/bootstrap.php';
+require __DIR__ . '/fixtures/engine_access.php';
 
 use \Fast;
 use Fast\Engine\Flat;
@@ -43,32 +44,61 @@ if (\count($a) !== 100) {
 }
 
 // --- raw surgery: open segment 0 and inject crash debris ---
-$seg = @\shmop_open(Flat::segKey($name, 0), 'w', 0, 0);
-if ($seg === false) {
-    $fail('could not open raw segment for surgery');
-}
-
-// 1) seqlock odd: a writer that died after seq+1 but before seq+2.
-$seq = \unpack('V', \shmop_read($seg, H_SEQ, 4))[1];
-\shmop_write($seg, \pack('V', $seq | 1), H_SEQ);
-
-// 2) bogus live counter: a half-finished op left H_LIVE wrong.
-\shmop_write($seg, \pack('V', 999999), H_LIVE);
-
-// 3) tear one live slot's confirm tag so its key hash no longer validates.
-$tornSlot = -1;
-for ($si = 0; $si < 1024; $si++) {
-    $state = \ord(\shmop_read($seg, HEADER + $si * SLOT + 22, 1));
-    if ($state === 1) { // ST_LIVE
-        \shmop_write($seg, \str_repeat("\xFF", 8), HEADER + $si * SLOT + 24); // smash hb2
-        $tornSlot = $si;
-        break;
+if (\extension_loaded('fast')) {
+    $path = fast_test_native_shm_file($name);
+    $blob = \file_get_contents($path);
+    if ($blob === false) {
+        $fail('could not read native shm for surgery');
     }
+
+    $seq = \unpack('V', \substr($blob, H_SEQ, 4))[1];
+    $blob = \substr_replace($blob, \pack('V', $seq | 1), H_SEQ, 4);
+    $blob = \substr_replace($blob, \pack('V', 999999), H_LIVE, 4);
+
+    $tornSlot = -1;
+    for ($si = 0; $si < 1024; $si++) {
+        $off = HEADER + $si * SLOT;
+        $state = \ord($blob[$off + 22] ?? "\0");
+        if ($state === 1) {
+            $blob = \substr_replace($blob, \str_repeat("\xFF", 8), $off + 24, 8);
+            $tornSlot = $si;
+            break;
+        }
+    }
+    if ($tornSlot < 0) {
+        $fail('surgery: found no live slot to tear');
+    }
+    if (\file_put_contents($path, $blob) === false) {
+        $fail('could not write native shm surgery');
+    }
+} else {
+    $seg = @\shmop_open(Flat::segKey($name, 0), 'w', 0, 0);
+    if ($seg === false) {
+        $fail('could not open raw segment for surgery');
+    }
+
+    // 1) seqlock odd: a writer that died after seq+1 but before seq+2.
+    $seq = \unpack('V', \shmop_read($seg, H_SEQ, 4))[1];
+    \shmop_write($seg, \pack('V', $seq | 1), H_SEQ);
+
+    // 2) bogus live counter: a half-finished op left H_LIVE wrong.
+    \shmop_write($seg, \pack('V', 999999), H_LIVE);
+
+    // 3) tear one live slot's confirm tag so its key hash no longer validates.
+    $tornSlot = -1;
+    for ($si = 0; $si < 1024; $si++) {
+        $state = \ord(\shmop_read($seg, HEADER + $si * SLOT + 22, 1));
+        if ($state === 1) { // ST_LIVE
+            \shmop_write($seg, \str_repeat("\xFF", 8), HEADER + $si * SLOT + 24); // smash hb2
+            $tornSlot = $si;
+            break;
+        }
+    }
+    if ($tornSlot < 0) {
+        $fail('surgery: found no live slot to tear');
+    }
+    \shmop_close($seg);
 }
-if ($tornSlot < 0) {
-    $fail('surgery: found no live slot to tear');
-}
-\shmop_close($seg);
 
 // --- reattach: triggers recoverIfCrashed on a non-orphaned existing store ---
 $b = new \Fast(['name' => $name]);
@@ -92,11 +122,9 @@ if ($readable !== 99) {
 }
 
 // seqlock healed to even: a fresh raw read must show an even counter.
-$chk = @\shmop_open(Flat::segKey($name, 0), 'w', 0, 0);
-$healed = \unpack('V', \shmop_read($chk, H_SEQ, 4))[1];
-\shmop_close($chk);
-if (($healed & 1) !== 0) {
-    $fail('seqlock still odd after recovery: ' . $healed);
+$healed = fast_test_raw_seq($name);
+if ($healed === null || ($healed & 1) !== 0) {
+    $fail('seqlock still odd after recovery: ' . \var_export($healed, true));
 }
 
 // the healed store must still take writes (insert + overwrite) correctly.

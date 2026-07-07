@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<package packagerversion="1.10.15" version="2.0"
+    xmlns="http://pear.php.net/dtd/package-2.0"
+    xmlns:tasks="http://pear.php.net/dtd/tasks-1.0"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://pear.php.net/dtd/tasks-1.0 http://pear.php.net/dtd/tasks-1.0.xsd http://pear.php.net/dtd/package-2.0 http://pear.php.net/dtd/package-2.0.xsd">
+ <name>fast</name>
+ <channel>pecl.php.net</channel>
+ <summary>Native shared-memory engine for Fast</summary>
+ <description>
+  Optional compiled extension implementing the Fast array-like shared-memory
+  store. When loaded, owns class Fast. Native LAYOUT_EXT wire format by default;
+  PHP LAYOUT_PHP compat available via fast.compat=1. Requires ext-igbinary.
+ </description>
+ <lead>
+  <name>James Dornan</name>
+  <user>johnnyjoy</user>
+  <email>james@example.com</email>
+  <active>yes</active>
+ </lead>
+ <date>2026-07-06</date>
+ <time>12:00:00</time>
+ <version>
+  <release>1.0.0</release>
+  <api>1.0.0</api>
+ </version>
+ <stability>
+  <release>stable</release>
+  <api>stable</api>
+ </stability>
+ <license uri="https://opensource.org/licenses/MIT">MIT</license>
+ <notes>
+  Initial PECL release. Native mmap shared store, optional PHP wire compat,
+  Striped v1, full tests/run.php contract under FAST_BACKEND=ext.
+ </notes>
+ <contents>
+  <dir name="/">
+   <file name="config.m4" role="src"/>
+   <file name="configure.ac" role="src"/>
+   <file name="php_fast.h" role="src"/>
+   <file name="fast.c" role="src"/>
+   <file name="fast_object.c" role="src"/>
+   <file name="fast_layout.h" role="src"/>
+   <file name="flat_engine_internal.h" role="src"/>
+   <file name="flat_native.c" role="src"/>
+   <file name="flat_native.h" role="src"/>
+   <file name="flat_compat.c" role="src"/>
+   <file name="flat_compat.h" role="src"/>
+   <file name="striped_native.c" role="src"/>
+   <file name="striped_native.h" role="src"/>
+   <file name="README.md" role="doc"/>
+   <file name="LICENSE" role="doc"/>
+   <file name="run-phpt.sh" role="doc"/>
+   <dir name="tests">
+    <file name="001_class.phpt" role="test"/>
+    <file name="002_ini_compat.phpt" role="test"/>
+    <file name="003_local.phpt" role="test"/>
+   </dir>
+  </dir>
+ </contents>
+ <dependencies>
+  <required>
+   <php>
+    <min>8.3.0</min>
+   </php>
+   <pearinstaller>
+    <min>1.10.0</min>
+   </pearinstaller>
+  </required>
+ </dependencies>
+ <providesextension>fast</providesextension>
+ <extsrcrelease>
+  <configureoption default="yes" name="enable-fast" prompt="Enable Fast shared-memory support?"/>
+ </extsrcrelease>
+</package>

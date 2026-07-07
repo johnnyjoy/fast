@@ -5,15 +5,21 @@ on:
   pull_request:
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  contract-php:
+    name: contract (${{ matrix.os }}, PHP ${{ matrix.php }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+        php: ['8.3', '8.4']
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.3'
+          php-version: ${{ matrix.php }}
           extensions: igbinary, shmop, sysvsem, pcntl
           coverage: none
 
@@ -23,5 +29,42 @@ jobs:
       - name: PHPDoc lint (public API)
         run: composer lint
 
-      - name: Run contract tests
+      - name: Run contract tests (userland)
         run: composer test
+
+  ext-fast:
+    name: ext-fast (${{ matrix.os }}, PHP ${{ matrix.php }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+        php: ['8.3', '8.4']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: igbinary, shmop, sysvsem, pcntl
+          coverage: none
+          tools: phpize
+
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Build ext-fast
+        working-directory: ext/fast
+        run: |
+          phpize
+          ./configure --enable-fast
+          make
+
+      - name: Run ext phpt tests
+        working-directory: ext/fast
+        run: ./run-phpt.sh
+
+      - name: Run full contract suite (ext backend)
+        run: |
+          FAST_BACKEND=ext FAST_EXT_SO="${{ github.workspace }}/ext/fast/modules/fast.so" php tests/run.php

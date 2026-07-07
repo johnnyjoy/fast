@@ -1,10 +1,26 @@
 # Performance
 
-This document tells you what Fast actually measures, what the numbers mean, and
-how to decide between **Flat** (default) and **Striped** (optional write
-concurrency). Everything here is reproducible from scripts in this repo.
+This document helps you choose between **Flat** (default) and **Striped**
+(`stripes` in config). Both use the same `\Fast` API.
 
-**Reference environment** (unless noted otherwise):
+All numbers here come from scripts in this repo — you can rerun them on your
+machine. Do not treat these as universal constants; RAM speed and CPU affect results.
+
+**Quick choice:**
+
+- **One writer, read-heavy, or one hot key** → Flat (default)
+- **Many processes writing different keys** → try Striped (`stripes` => 8, etc.)
+- **Everyone writing the same key** → Striped will not help
+
+Run the comparison yourself:
+
+```bash
+php benchmarks/compare-engines.php
+```
+
+---
+
+### Reference environment
 
 - PHP 8.3.30, Linux x86_64
 - CPU: AMD Ryzen 9 3900X (12 cores / 24 threads)
@@ -45,18 +61,22 @@ before you commit to a configuration.
 
 ## Two engines, one API
 
-Both engines implement the same public surface: `new Fast([...])`, array syntax,
-`foreach`, `count()`, lifecycle.
+Both engines use the same code you write:
+
+```php
+$store = new Fast(['name' => 'workers', 'stripes' => 8]); // Striped
+$store = new Fast(['name' => 'workers']);                  // Flat (default)
+```
 
 | | **Flat** | **Striped** |
 |---|----------|-------------|
 | Config | omit `stripes`, or `stripes => 1` | `'stripes' => 8` (power of two ≥ 2) |
-| Storage | one SysV segment set, one write lock | N independent Flat sub-stores, N locks |
+| Storage | one shared store, one write lock | N sub-stores, N locks |
 | Best for | single writer, read-heavy, hot keys, strict iteration order | many processes writing **different** keys |
 | Default | **yes** | opt-in only |
 
-Striped is not “a faster Flat.” It is a different layout you enable when
-multi-process **write** contention on spread keys is your bottleneck.
+Striped is not “a faster Flat.” Enable it when many workers write **different keys**
+and Flat’s single lock becomes the bottleneck.
 
 ---
 

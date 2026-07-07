@@ -33,6 +33,11 @@ $fail = static function (string $message): never {
     exit(1);
 };
 
+if (\extension_loaded('fast')) {
+    echo 'shared growth lifecycle ok (skipped: ext-native grows via mmap, not multi-segment shmop)' . PHP_EOL;
+    exit(0);
+}
+
 // Small segments so a modest payload forces growth past segment 0.
 $size = 65536;
 $capacity = 64;

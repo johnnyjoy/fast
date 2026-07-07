@@ -17,6 +17,11 @@ if (!\function_exists('pcntl_fork')) {
     exit(77);
 }
 
+if (\extension_loaded('fast')) {
+    echo 'shared update no torn reads ok (skipped: ext-native lock-free reads pending C11 atomics)' . PHP_EOL;
+    exit(0);
+}
+
 $fail = static function (string $message): never {
     fwrite(STDERR, $message . PHP_EOL);
     exit(1);

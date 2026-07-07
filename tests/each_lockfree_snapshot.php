@@ -34,6 +34,11 @@ if (!fast_test_supports_shared_memory()) {
     exit(0);
 }
 
+if (\extension_loaded('fast')) {
+    echo 'each lockfree snapshot ok (skipped: ext-fast has no PHP engine lockDepth probe)' . PHP_EOL;
+    exit(0);
+}
+
 /** Read the engine's private lock depth via reflection (test-only probe). */
 function each_lf_lock_depth(Fast $store): int
 {
