@@ -155,6 +155,16 @@ static bool fast_igbinary_encode(zval *value, zend_string **out)
 
 static bool fast_igbinary_decode(zend_string *data, zval *out)
 {
+	if (ZSTR_LEN(data) < 1) {
+		return false;
+	}
+	{
+		uint8_t ver = (uint8_t)ZSTR_VAL(data)[0];
+
+		if (ver != 1 && ver != 2) {
+			return false;
+		}
+	}
 	if (igbinary_unserialize((const uint8_t *)ZSTR_VAL(data), ZSTR_LEN(data), out) != 0) {
 		return false;
 	}
@@ -741,7 +751,7 @@ void fast_engine_init_fresh_native(fast_native_t *eng, bool persistent)
 }
 
 static bool fast_probe(fast_native_t *eng, uint32_t base, zend_string *kb, zend_string *hb, zend_string *hb2,
-	bool need_val, zval *value_out, uint8_t *vtype_out)
+	bool need_val, uint8_t *vtype_out, zend_string **payload_out)
 {
 	uint32_t kl = (uint32_t)ZSTR_LEN(kb);
 
@@ -783,12 +793,10 @@ static bool fast_probe(fast_native_t *eng, uint32_t base, zend_string *kb, zend_
 					zend_string_release(vb);
 					return false;
 				}
-				fast_dec_value(vtype, vb, value_out);
-				zend_string_release(vb);
-				if (memcmp(slot + 24, hb2_before, 8) != 0
-					|| fast_ru32(slot, 12) != gen_before
-					|| fast_ru32(slot, 16) != vallen_before) {
-					return false;
+				if (payload_out) {
+					*payload_out = vb;
+				} else {
+					zend_string_release(vb);
 				}
 			}
 			return true;
@@ -1156,25 +1164,44 @@ bool fast_native_get(fast_native_t *eng, zval *key, zval *value_out)
 	}
 	uint32_t base = fast_probe_base(hb) & eng->mask;
 	bool hit = false;
+	bool done = false;
 
-	/* Seqlock readers: spin while even seq stable; fall back to sem if contended. */
-	for (uint32_t spin = 0; spin < eng->spin; spin++) {
+	/* Seqlock readers: copy payload while seq stable; decode only after s1==s2. */
+	for (uint32_t spin = 0; spin < eng->spin && !done; spin++) {
 		uint32_t s1 = fast_ru32(eng->map, FAST_H_SEQ);
+		zend_string *payload = NULL;
+		uint8_t vtype = 0;
+
 		if (s1 & 1U) {
 			continue;
 		}
-		hit = fast_probe(eng, base, kb, hb, hb2, true, value_out, NULL);
+		hit = fast_probe(eng, base, kb, hb, hb2, true, &vtype, &payload);
 		{
 			uint32_t s2 = fast_ru32(eng->map, FAST_H_SEQ);
-			if (hit && s1 == s2 && !(s2 & 1U)) {
-				break;
+			if (hit && payload && s1 == s2 && !(s2 & 1U)
+				&& fast_dec_value(vtype, payload, value_out)) {
+				done = true;
 			}
 		}
-		hit = false;
+		if (payload) {
+			zend_string_release(payload);
+		}
+		if (!done) {
+			hit = false;
+		}
 	}
-	if (!hit) {
+	if (!done) {
+		zend_string *payload = NULL;
+		uint8_t vtype = 0;
+
 		fast_sem_lock(eng->sem_id);
-		hit = fast_probe(eng, base, kb, hb, hb2, true, value_out, NULL);
+		hit = fast_probe(eng, base, kb, hb, hb2, true, &vtype, &payload);
+		if (hit && payload) {
+			if (!fast_dec_value(vtype, payload, value_out)) {
+				hit = false;
+			}
+			zend_string_release(payload);
+		}
 		fast_sem_unlock(eng->sem_id);
 	}
 
@@ -1202,7 +1229,7 @@ bool fast_native_has(fast_native_t *eng, zval *key)
 		if (s1 & 1U) {
 			continue;
 		}
-		hit = fast_probe(eng, base, kb, hb, hb2, false, NULL, &vtype);
+		hit = fast_probe(eng, base, kb, hb, hb2, false, &vtype, NULL);
 		if (s1 == fast_ru32(eng->map, FAST_H_SEQ)) {
 			break;
 		}
@@ -1210,7 +1237,7 @@ bool fast_native_has(fast_native_t *eng, zval *key)
 	}
 	if (!hit) {
 		fast_sem_lock(eng->sem_id);
-		hit = fast_probe(eng, base, kb, hb, hb2, false, NULL, &vtype);
+		hit = fast_probe(eng, base, kb, hb, hb2, false, &vtype, NULL);
 		fast_sem_unlock(eng->sem_id);
 	}
 
