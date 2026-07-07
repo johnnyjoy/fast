@@ -8,8 +8,6 @@
 
 require __DIR__ . '/bootstrap.php';
 
-use \Fast;
-
 if (!function_exists('pcntl_fork')) {
     fwrite(STDERR, "pcntl required\n");
     exit(77);
@@ -157,7 +155,7 @@ for ($w = 0; $w < $workers; $w++) {
     $pids[] = $pid;
 }
 
-function test_mp_batch(Fast $store, string $key, int $seed): void
+function test_mp_batch(\Fast $store, string $key, int $seed): void
 {
     $store[$key . ':x'] = $seed;
     $store[$key . ':y'] = $seed + 1;

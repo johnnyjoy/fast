@@ -155,14 +155,14 @@ static bool fast_igbinary_encode(zval *value, zend_string **out)
 
 static bool fast_igbinary_decode(zend_string *data, zval *out)
 {
-	/* igbinary header: 3 reserved bytes + 1-byte format version (1 or 2). */
+	/* igbinary header is 4 bytes: 0x00 0x00 0x00 0x01|0x02 (big-endian version). */
 	if (ZSTR_LEN(data) < 4) {
 		return false;
 	}
 	{
-		uint8_t ver = (uint8_t)ZSTR_VAL(data)[3];
+		const uint8_t *b = (const uint8_t *)ZSTR_VAL(data);
 
-		if (ver != 1 && ver != 2) {
+		if (b[0] != 0 || b[1] != 0 || b[2] != 0 || (b[3] != 1 && b[3] != 2)) {
 			return false;
 		}
 	}
@@ -778,6 +778,7 @@ static bool fast_probe(fast_native_t *eng, uint32_t base, zend_string *kb, zend_
 				zend_string *vb;
 				char *rec;
 				uint32_t gen_before = fast_ru32(slot, 12);
+				uint32_t rec_off_before = rec_off;
 				uint32_t vallen_before = vallen;
 				char hb2_before[8];
 
@@ -790,6 +791,7 @@ static bool fast_probe(fast_native_t *eng, uint32_t base, zend_string *kb, zend_
 				}
 				if (memcmp(slot + 24, hb2_before, 8) != 0
 					|| fast_ru32(slot, 12) != gen_before
+					|| fast_ru32(slot, 8) != rec_off_before
 					|| fast_ru32(slot, 16) != vallen_before) {
 					zend_string_release(vb);
 					return false;
@@ -885,8 +887,10 @@ static void fast_do_overwrite(fast_native_t *eng, uint32_t si, uint32_t rec_off,
 {
 	uint32_t vl = (uint32_t)ZSTR_LEN(vb);
 	if (vl <= old_vl) {
-		memcpy(fast_rec_ptr(eng, rec_off) + kl, ZSTR_VAL(vb), vl);
 		char *slot = eng->map + fast_dir_off(si);
+
+		fast_wu32(slot, 12, gen + 1);
+		memcpy(fast_rec_ptr(eng, rec_off) + kl, ZSTR_VAL(vb), vl);
 		fast_wu32(slot, 16, vl);
 		slot[23] = (char)types;
 		return;
@@ -902,6 +906,7 @@ static void fast_do_overwrite(fast_native_t *eng, uint32_t si, uint32_t rec_off,
 	}
 	char slot[FAST_SLOT];
 	memcpy(slot, eng->map + fast_dir_off(si), FAST_SLOT);
+	fast_wu32(slot, 12, gen + 1);
 	fast_wu32(slot, 8, off);
 	fast_wu32(slot, 16, vl);
 	slot[23] = (char)types;
@@ -1167,7 +1172,9 @@ bool fast_native_get(fast_native_t *eng, zval *key, zval *value_out)
 	bool hit = false;
 	bool done = false;
 
-	/* Seqlock readers: copy payload while seq stable; decode only after s1==s2. */
+	/* Snapshot read: copy payload, confirm seq stable, then decode (all types).
+	 * Writers bump slot gen before overwriting bytes so probe can reject torn copies.
+	 * Spin exhaustion falls back to the same steps under the writer semaphore. */
 	for (uint32_t spin = 0; spin < eng->spin && !done; spin++) {
 		uint32_t s1 = fast_ru32(eng->map, FAST_H_SEQ);
 		zend_string *payload = NULL;
