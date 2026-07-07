@@ -57,6 +57,7 @@ jobs:
       - name: Build ext-fast
         working-directory: ext/fast
         run: |
+          find . -maxdepth 1 -name '*.dep' -delete
           phpize
           ./configure --enable-fast
           make

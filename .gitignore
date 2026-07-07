@@ -23,6 +23,11 @@ phpcs.phar
 /ext/fast/.libs/
 /ext/fast/*.lo
 /ext/fast/*.la
+/ext/fast/*.dep
+/ext/fast/config.h.in~
+/ext/fast/config.nice
+/ext/fast/configure~
+/ext/fast/conftest/
 /ext/fast/install-sh
 /ext/fast/ltmain.sh
 /ext/fast/missing
