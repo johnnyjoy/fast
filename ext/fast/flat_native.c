@@ -155,11 +155,12 @@ static bool fast_igbinary_encode(zval *value, zend_string **out)
 
 static bool fast_igbinary_decode(zend_string *data, zval *out)
 {
-	if (ZSTR_LEN(data) < 1) {
+	/* igbinary header: 3 reserved bytes + 1-byte format version (1 or 2). */
+	if (ZSTR_LEN(data) < 4) {
 		return false;
 	}
 	{
-		uint8_t ver = (uint8_t)ZSTR_VAL(data)[0];
+		uint8_t ver = (uint8_t)ZSTR_VAL(data)[3];
 
 		if (ver != 1 && ver != 2) {
 			return false;
