@@ -24,6 +24,14 @@ When the extension is loaded, it **registers** `\Fast` — you do not also load
 
 ## Install on a server (from source)
 
+Install **igbinary** and **sysvsem** first (Fast depends on igbinary at load time):
+
+```bash
+# Debian/Ubuntu example — package names vary by PHP version
+sudo apt-get install -y php8.3-dev php8.3-igbinary php8.3-sysvsem php8.3-shmop
+# Or: sudo pecl install igbinary  (then enable igbinary before fast in php.ini)
+```
+
 ```bash
 git clone https://github.com/johnnyjoy/fast.git
 cd fast/ext/fast
@@ -34,7 +42,7 @@ make
 sudo make install
 ```
 
-Enable in PHP (FPM and CLI if you use both):
+Enable in PHP (FPM and CLI if you use both). **Load igbinary before fast:**
 
 ```ini
 extension=igbinary
@@ -67,8 +75,29 @@ You need these PHP extensions in the image:
 | sysvsem | Yes — write locking |
 | shmop | Only if `fast.compat=1` (PHP ↔ ext interop) |
 
-Build context: copy `ext/fast` from this repo. Examples assume the **repository
-root** is the Docker build context and you run `COPY ext/fast /usr/src/ext/fast`.
+Build context: the **repository root** is the Docker build context and you run
+`COPY ext/fast /usr/src/ext/fast`.
+
+**Important:** exclude host `phpize` artifacts from the build context. A local
+`make` in `ext/fast` leaves a `Makefile` with absolute paths from your machine;
+`docker build` will then fail inside the container. The repo includes
+[`.dockerignore`](../.dockerignore) for this. If you copy files manually, omit
+`Makefile`, `*.dep`, `modules/`, and `.libs/`.
+
+Tested Dockerfiles (kept in sync with this doc): [`docker/debian-fpm.Dockerfile`](../docker/debian-fpm.Dockerfile),
+[`docker/alpine-fpm.Dockerfile`](../docker/alpine-fpm.Dockerfile). Smoke test:
+`docker build -f docker/debian-fpm.Dockerfile . && ./docker/smoke.sh fast-ext-debian-fpm`.
+
+Use a **single INI** with igbinary listed before fast. `docker-php-ext-enable`
+creates separate files loaded in alphabetical order (`fast` before `igbinary`),
+which breaks on Alpine (musl) and is fragile elsewhere:
+
+```ini
+; /usr/local/etc/php/conf.d/99-fast.ini
+extension=igbinary
+extension=fast
+fast.compat=0
+```
 
 ### Debian — `php:8.3-fpm-bookworm`
 
@@ -78,8 +107,7 @@ FROM php:8.3-fpm-bookworm
 RUN apt-get update \
     && apt-get install -y --no-install-recommends $PHPIZE_DEPS \
     && docker-php-ext-install sysvsem shmop \
-    && pecl install igbinary \
-    && docker-php-ext-enable igbinary
+    && pecl install igbinary
 
 COPY ext/fast /usr/src/ext/fast
 WORKDIR /usr/src/ext/fast
@@ -87,8 +115,13 @@ RUN phpize \
     && ./configure --enable-fast \
     && make -j"$(nproc)" \
     && make install \
-    && docker-php-ext-enable fast \
     && rm -rf /usr/src/ext/fast
+
+RUN { \
+      echo 'extension=igbinary'; \
+      echo 'extension=fast'; \
+      echo 'fast.compat=0'; \
+    } > /usr/local/etc/php/conf.d/99-fast.ini
 
 RUN apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false \
         $PHPIZE_DEPS \
@@ -97,20 +130,12 @@ RUN apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false
 WORKDIR /var/www/html
 ```
 
-Or use a drop-in INI:
-
-```ini
-; /usr/local/etc/php/conf.d/99-fast.ini
-extension=igbinary
-extension=fast
-fast.compat=0
-```
-
 Verify in the container:
 
 ```bash
 php-fpm -t
 php -m | grep -E '^(fast|igbinary|sysvsem)$'
+php -r 'var_dump(class_exists("Fast"));'
 ```
 
 ### Alpine — `php:8.3-fpm-alpine`
@@ -120,8 +145,7 @@ FROM php:8.3-fpm-alpine
 
 RUN apk add --no-cache $PHPIZE_DEPS linux-headers \
     && docker-php-ext-install sysvsem shmop \
-    && pecl install igbinary \
-    && docker-php-ext-enable igbinary
+    && pecl install igbinary
 
 COPY ext/fast /usr/src/ext/fast
 WORKDIR /usr/src/ext/fast
@@ -129,8 +153,13 @@ RUN phpize \
     && ./configure --enable-fast \
     && make -j"$(nproc)" \
     && make install \
-    && docker-php-ext-enable fast \
     && rm -rf /usr/src/ext/fast
+
+RUN { \
+      echo 'extension=igbinary'; \
+      echo 'extension=fast'; \
+      echo 'fast.compat=0'; \
+    } > /usr/local/etc/php/conf.d/99-fast.ini
 
 RUN apk del $PHPIZE_DEPS
 
@@ -200,6 +229,8 @@ You do not need both at runtime when ext is enabled.
 | Problem | Fix |
 |---------|-----|
 | `igbinary` missing at startup | Install and enable igbinary **before** fast |
+| Docker `make`: path `/home/.../fast.c` not found | Host `Makefile` in `COPY ext/fast` — use [`.dockerignore`](../.dockerignore) or clean `ext/fast` before build |
+| Alpine: `igbinary_unserialize: symbol not found` | Load order: igbinary INI must come before fast (use one `99-fast.ini`, not separate `docker-php-ext-*.ini`) |
 | Layout error opening store | Native vs PHP mismatch — use one backend or enable compat on both |
 | `segment key … already in use` | Pick a different store `name` |
 | Out of shared memory | Increase `shm_size` in Docker or lower `size` in config |
@@ -212,5 +243,14 @@ You do not need both at runtime when ext is enabled.
 ```bash
 cd ext/fast && make
 ./run-phpt.sh
-FAST_BACKEND=ext FAST_EXT_SO=ext/fast/modules/fast.so php tests/run.php
+cd ../.. && FAST_BACKEND=ext FAST_EXT_SO=ext/fast/modules/fast.so php tests/run.php
+```
+
+Docker smoke (from repo root):
+
+```bash
+docker build -f docker/debian-fpm.Dockerfile -t fast-ext-debian-fpm .
+docker build -f docker/alpine-fpm.Dockerfile -t fast-ext-alpine-fpm .
+./docker/smoke.sh fast-ext-debian-fpm
+./docker/smoke.sh fast-ext-alpine-fpm
 ```

@@ -24,7 +24,8 @@ sudo make install
 ```
 
 ```ini
-; php.ini
+; php.ini — igbinary must load before fast
+extension=igbinary
 extension=fast
 fast.compat=0   ; 0 = native LAYOUT_EXT (default), 1 = PHP LAYOUT_PHP interop
 ```

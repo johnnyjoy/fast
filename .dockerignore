@@ -1,0 +1,21 @@
+# Keep Docker COPY ext/fast free of host phpize artifacts (absolute paths in Makefile).
+ext/fast/.libs
+ext/fast/modules
+ext/fast/autom4te.cache
+ext/fast/*.lo
+ext/fast/*.la
+ext/fast/*.dep
+ext/fast/Makefile
+ext/fast/Makefile.fragments
+ext/fast/Makefile.objects
+ext/fast/config.status
+ext/fast/config.cache
+ext/fast/config.h
+ext/fast/config.log
+ext/fast/configure
+ext/fast/run-tests.php
+ext/fast/libtool
+ext/fast/acinclude.m4
+ext/fast/aclocal.m4
+ext/fast/build
+ext/fast/configure~

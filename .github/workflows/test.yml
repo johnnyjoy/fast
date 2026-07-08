@@ -69,3 +69,22 @@ jobs:
       - name: Run full contract suite (ext backend)
         run: |
           FAST_BACKEND=ext FAST_EXT_SO="${{ github.workspace }}/ext/fast/modules/fast.so" php tests/run.php
+
+  docker-fpm:
+    name: docker-fpm (${{ matrix.dockerfile }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        dockerfile: [docker/debian-fpm.Dockerfile, docker/alpine-fpm.Dockerfile]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build FPM image
+        run: |
+          tag="fast-ext-$(basename '${{ matrix.dockerfile }}' .Dockerfile)"
+          docker build -f "${{ matrix.dockerfile }}" -t "$tag" .
+          echo "IMAGE_TAG=$tag" >> "$GITHUB_ENV"
+
+      - name: Smoke test (FPM + shared Fast)
+        run: ./docker/smoke.sh "$IMAGE_TAG"
