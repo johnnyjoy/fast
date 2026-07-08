@@ -75,8 +75,18 @@ composer test
 | 2 | igbinary | PHP `igbinary_*` in v1 |
 | 3 | Native namespace | `fast-native-*` (distinct from PHP `fast-flat-*`) |
 | 4 | Striped | Native Striped v1, same semantics |
-| 5 | ARM64 | Semaphore reads only |
+| 5 | ARM64 | Semaphore reads only (`spin=0` on non-TSO CPUs) |
 | 6 | Compat default | Off — native default |
+
+## Concurrency reads
+
+Lock-free reads use a seqlock on `H_SEQ` with no explicit memory fence. That is
+correct on **TSO CPUs** (x86/x86_64). On weakly ordered CPUs (ARM64, etc.) the
+extension sets `spin=0` at attach so reads go through the writer semaphore
+(syscall barrier), matching PHP `Flat.php`.
+
+Override for testing: `FAST_LOCKFREE=0` (always locked reads) or `FAST_LOCKFREE=1`
+(force lock-free spin attempts).
 
 ## Layout specs
 

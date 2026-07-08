@@ -50,5 +50,6 @@ void fast_engine_adopt_geometry(fast_native_t *eng);
 bool fast_engine_name_hash_match(fast_native_t *eng, const char *name, size_t len);
 void fast_engine_delete_segments(fast_native_t *eng);
 bool fast_engine_is_sole_connection(fast_native_t *eng);
+uint32_t fast_engine_lockfree_spin(void);
 
 #endif

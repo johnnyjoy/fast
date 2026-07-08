@@ -154,6 +154,87 @@ function fast_test_raw_seq(string $name): ?int
     return \unpack('V', \shmop_read($seg, 8, 4))[1];
 }
 
+/** Header offset H_ORDER (order-log entry count). Layout: Flat.php / fast_layout.h */
+const FAST_TEST_H_ORDER = 20;
+
+/** Header offset H_SLOTS (directory slot count). */
+const FAST_TEST_H_SLOTS = 32;
+
+/**
+ * Raw order-log length from segment 0 (test-only invariant gate).
+ */
+function fast_test_order_count(string $name): ?int
+{
+    if (\extension_loaded('fast')) {
+        $path = fast_test_native_shm_file($name);
+        if (!\is_readable($path)) {
+            return null;
+        }
+        $raw = @\file_get_contents($path, false, null, FAST_TEST_H_ORDER, 4);
+        if ($raw === false || \strlen($raw) < 4) {
+            return null;
+        }
+
+        return \unpack('V', $raw)[1];
+    }
+
+    $seg = @\shmop_open(Flat::segKey($name, 0), 'a', 0, 0);
+    if ($seg === false) {
+        return null;
+    }
+
+    return \unpack('V', \shmop_read($seg, FAST_TEST_H_ORDER, 4))[1];
+}
+
+/**
+ * Raw directory slot count from segment 0 header (H_SLOTS).
+ */
+function fast_test_directory_slots(string $name): ?int
+{
+    if (\extension_loaded('fast')) {
+        $path = fast_test_native_shm_file($name);
+        if (!\is_readable($path)) {
+            return null;
+        }
+        $raw = @\file_get_contents($path, false, null, FAST_TEST_H_SLOTS, 4);
+        if ($raw === false || \strlen($raw) < 4) {
+            return null;
+        }
+
+        return \unpack('V', $raw)[1];
+    }
+
+    $seg = @\shmop_open(Flat::segKey($name, 0), 'a', 0, 0);
+    if ($seg === false) {
+        return null;
+    }
+
+    return \unpack('V', \shmop_read($seg, FAST_TEST_H_SLOTS, 4))[1];
+}
+
+/**
+ * Assert H_ORDER <= directory slot count (order log never exceeds reserved region).
+ *
+ * @throws \RuntimeException when the invariant is violated or the header is unreadable
+ */
+function fast_test_assert_order_log_bounded(Fast $store, string $name): void
+{
+    $slots = fast_test_directory_slots($name);
+    $oc = fast_test_order_count($name);
+
+    if ($oc === null) {
+        throw new \RuntimeException('could not read H_ORDER for store "' . $name . '"');
+    }
+    if ($slots === null || $slots < 1) {
+        throw new \RuntimeException('could not read H_SLOTS for store "' . $name . '"');
+    }
+    if ($oc > $slots) {
+        throw new \RuntimeException(
+            'order log overflow: H_ORDER=' . $oc . ' exceeds directory_slots=' . $slots
+        );
+    }
+}
+
 /**
  * Test-only capability probe. Shared mode requires shmop + sysvsem; shared-mode
  * tests gate themselves on this instead of a public Fast capability method.

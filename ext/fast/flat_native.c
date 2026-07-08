@@ -27,6 +27,8 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <strings.h>
+#include <sys/utsname.h>
 #include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/shm.h>
@@ -71,6 +73,48 @@ static inline size_t fast_alloc_limit(fast_native_t *eng)
 static HashTable fast_link_refs;
 static HashTable fast_link_fps;
 static int fast_link_pid = -1;
+
+/* Parity: Flat.php tsoReads() — memoized per process, FAST_LOCKFREE overrides. */
+static bool fast_cpu_tso(void)
+{
+	static const char *tso_machines[] = {
+		"x86_64", "amd64", "i386", "i486", "i586", "i686", "x86", NULL
+	};
+	struct utsname uts;
+	const char **m;
+
+	if (uname(&uts) != 0) {
+		return false;
+	}
+	for (m = tso_machines; *m; m++) {
+		if (strcasecmp(uts.machine, *m) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool fast_tso_reads(void)
+{
+	static int cached = -1;
+	const char *env;
+
+	if (cached >= 0) {
+		return cached != 0;
+	}
+	env = getenv("FAST_LOCKFREE");
+	if (env && env[0] != '\0') {
+		cached = (strcmp(env, "0") != 0) ? 1 : 0;
+		return cached != 0;
+	}
+	cached = fast_cpu_tso() ? 1 : 0;
+	return cached != 0;
+}
+
+uint32_t fast_engine_lockfree_spin(void)
+{
+	return fast_tso_reads() ? FAST_SPIN : 0;
+}
 
 /* Per-process link table: LOCK_SH on fast-native-*.lock for crash-detectable attach
  * count. Kernel drops flock on exit; sole-connection probe uses LOCK_EX|LOCK_NB. */
@@ -527,11 +571,88 @@ static bool fast_slot_key_valid(fast_native_t *eng, const char *slot, uint32_t r
 	return memcmp(digest, slot, 8) == 0 && memcmp(digest + 8, slot + 24, 8) == 0;
 }
 
+static inline uint32_t fast_class_cap(uint32_t need)
+{
+	uint32_t cap = FAST_ALLOC_MIN;
+
+	while (cap < need) {
+		cap <<= 1;
+	}
+	return cap;
+}
+
+static inline void fast_class_for_need(uint32_t need, uint32_t *ci_out, uint32_t *cap_out)
+{
+	uint32_t cap = FAST_ALLOC_MIN;
+	uint32_t ci = 0;
+
+	while (cap < need) {
+		cap <<= 1;
+		ci++;
+	}
+	*ci_out = ci;
+	*cap_out = cap;
+}
+
+static inline uint32_t fast_class_index(uint32_t cap)
+{
+	uint32_t ci = 0;
+	uint32_t c = FAST_ALLOC_MIN;
+
+	while (c < cap) {
+		c <<= 1;
+		ci++;
+	}
+	return ci;
+}
+
+/* Parity: Flat.php freeBlock() — must hold writer lock. */
+static void fast_free_block(fast_native_t *eng, uint32_t off, uint32_t cap)
+{
+	uint32_t ci = fast_class_index(cap);
+	char *block;
+	uint64_t head;
+
+	if (off < eng->arena_base || (uint64_t)off >= (uint64_t)eng->map_size) {
+		return;
+	}
+	block = fast_rec_ptr(eng, off);
+	head = fast_read_u64(eng->map, FAST_H_FREEHEADS + (size_t)ci * 8);
+	fast_wu64(eng->map, (size_t)(block - eng->map), head);
+	fast_wu64(eng->map, FAST_H_FREEHEADS + (size_t)ci * 8, (uint64_t)off);
+}
+
+static void fast_compact_order(fast_native_t *eng);
+
+/* Parity: src/Engine/Flat.php repairAfterCrash() — must hold writer lock. */
 static void fast_repair_after_crash(fast_native_t *eng)
 {
 	uint32_t order_base = fast_order_base(eng->slot_count);
+	uint32_t ob = eng->order_bytes;
 	uint32_t oc = fast_ru32(eng->map, FAST_H_ORDER);
+	uint32_t *covered_gen;
 	uint32_t live = 0, tomb = 0;
+	uint64_t caps = 0;
+	struct {
+		uint32_t si;
+		uint32_t gen;
+	} *missing = NULL;
+	uint32_t missing_count = 0;
+	uint32_t missing_cap = 0;
+
+	covered_gen = ecalloc(eng->slot_count, sizeof(uint32_t));
+	for (uint32_t i = 0; i < eng->slot_count; i++) {
+		covered_gen[i] = 0xffffffffU;
+	}
+
+	for (uint32_t r = 0; r < oc; r++) {
+		uint32_t si = fast_ru32(eng->map, order_base + r * ob);
+		uint32_t gen = fast_ru32(eng->map, order_base + r * ob + 4);
+
+		if (si < eng->slot_count) {
+			covered_gen[si] = gen;
+		}
+	}
 
 	for (uint32_t si = 0; si < eng->slot_count; si++) {
 		char *slot = eng->map + fast_dir_off(si);
@@ -544,34 +665,53 @@ static void fast_repair_after_crash(fast_native_t *eng)
 			tomb++;
 			continue;
 		}
+
 		uint32_t rec_off = fast_ru32(slot, 8);
+		uint32_t gen = fast_ru32(slot, 12);
 		uint32_t vallen = fast_ru32(slot, 16);
 		uint16_t keylen = (uint16_t)((uint8_t)slot[20] | ((uint16_t)(uint8_t)slot[21] << 8));
+
 		if (!fast_slot_key_valid(eng, slot, rec_off, keylen, vallen)) {
 			slot[22] = (char)FAST_ST_TOMB;
 			tomb++;
 			continue;
 		}
+
 		live++;
+		caps += fast_class_cap(keylen + vallen);
+		if (covered_gen[si] != gen) {
+			if (missing_count >= missing_cap) {
+				missing_cap = missing_cap ? missing_cap * 2 : 8;
+				missing = erealloc(missing, missing_cap * sizeof(*missing));
+			}
+			missing[missing_count].si = si;
+			missing[missing_count].gen = gen;
+			missing_count++;
+		}
+	}
+
+	for (uint32_t m = 0; m < missing_count; m++) {
+		if (oc >= eng->slot_count) {
+			fast_compact_order(eng);
+			oc = fast_ru32(eng->map, FAST_H_ORDER);
+		}
+		fast_wu32(eng->map, order_base + oc * ob, missing[m].si);
+		fast_wu32(eng->map, order_base + oc * ob + 4, missing[m].gen);
+		if (ob == FAST_ORDER_TAGGED) {
+			fast_wu64(eng->map, order_base + oc * ob + 8, (uint64_t)zend_hrtime());
+		}
+		fast_wu32(eng->map, FAST_H_ORDER, oc + 1);
+		oc++;
 	}
 
 	fast_wu32(eng->map, FAST_H_LIVE, live);
 	fast_wu32(eng->map, FAST_H_TOMB, tomb);
-	fast_wu64(eng->map, FAST_H_LIVECAPS, 0);
+	fast_wu64(eng->map, FAST_H_LIVECAPS, caps);
 
-	/* Rebuild order log from live slots (simple append in slot order). */
-	fast_wu32(eng->map, FAST_H_ORDER, 0);
-	oc = 0;
-	for (uint32_t si = 0; si < eng->slot_count; si++) {
-		char *slot = eng->map + fast_dir_off(si);
-		if ((uint8_t)slot[22] != FAST_ST_LIVE) {
-			continue;
-		}
-		fast_wu32(eng->map, order_base + oc * FAST_ORDER, si);
-		fast_wu32(eng->map, order_base + oc * FAST_ORDER + 4, fast_ru32(slot, 12));
-		oc++;
+	efree(covered_gen);
+	if (missing) {
+		efree(missing);
 	}
-	fast_wu32(eng->map, FAST_H_ORDER, oc);
 }
 
 static void fast_recover_if_crashed(fast_native_t *eng)
@@ -643,6 +783,141 @@ static void fast_shm_path(fast_native_t *eng, const char *name, size_t len)
 		fast_native_seg_key(name, len, 0));
 }
 
+static void fast_map_invalidate(fast_native_t *eng)
+{
+	if (!eng) {
+		return;
+	}
+	eng->map = NULL;
+	eng->map_size = 0;
+}
+
+/* Remap eng->map to new_size; on total failure the engine is left unmapped. */
+static bool fast_map_resize(fast_native_t *eng, size_t new_size)
+{
+	char *old_map;
+	size_t old_size;
+	void *nm;
+
+	if (!eng || eng->shm_fd < 0 || new_size < FAST_HEADER) {
+		return false;
+	}
+	if (eng->map && eng->map != MAP_FAILED && new_size == eng->map_size) {
+		return true;
+	}
+
+	old_map = eng->map;
+	old_size = eng->map_size;
+
+	if (old_map && old_map != MAP_FAILED && old_size > 0) {
+		nm = mremap(old_map, old_size, new_size, MREMAP_MAYMOVE);
+		if (nm != MAP_FAILED) {
+			eng->map = (char *)nm;
+			eng->map_size = new_size;
+			return true;
+		}
+		munmap(old_map, old_size);
+		fast_map_invalidate(eng);
+	}
+
+	nm = mmap(NULL, new_size, PROT_READ | PROT_WRITE, MAP_SHARED, eng->shm_fd, 0);
+	if (nm == MAP_FAILED) {
+		return false;
+	}
+	eng->map = (char *)nm;
+	eng->map_size = new_size;
+	return true;
+}
+
+static bool fast_map_sync_geometry(fast_native_t *eng)
+{
+	uint32_t slots;
+
+	if (!eng || !eng->map || eng->map == MAP_FAILED) {
+		return false;
+	}
+	slots = fast_ru32(eng->map, FAST_H_SLOTS);
+	if (slots < 1 || (slots & (slots - 1)) != 0) {
+		return false;
+	}
+	eng->slot_count = slots;
+	eng->mask = slots - 1;
+	eng->order_bytes = fast_ru32(eng->map, FAST_H_ORDERSZ);
+	if (eng->order_bytes != FAST_ORDER && eng->order_bytes != FAST_ORDER_TAGGED) {
+		eng->order_bytes = FAST_ORDER;
+	}
+	eng->arena_base = fast_arena_base(eng->slot_count, eng->order_bytes);
+	return true;
+}
+
+static bool fast_native_sync_map(fast_native_t *eng)
+{
+	struct stat st;
+	size_t actual;
+
+	/* Remap when a peer grew the mmap arena (ftruncate in another process). */
+	if (eng->compat || eng->shm_fd < 0) {
+		if (!eng->map || eng->map == MAP_FAILED) {
+			zend_throw_exception_ex(spl_ce_RuntimeException, 0,
+				"shared Fast store mapping lost");
+			return false;
+		}
+		return true;
+	}
+
+	if ((!eng->map || eng->map == MAP_FAILED) && eng->shm_fd >= 0) {
+		if (fstat(eng->shm_fd, &st) != 0 || (size_t)st.st_size < FAST_HEADER) {
+			zend_throw_exception_ex(spl_ce_RuntimeException, 0,
+				"shared Fast store mapping lost");
+			return false;
+		}
+		if (!fast_map_resize(eng, (size_t)st.st_size)) {
+			zend_throw_exception_ex(spl_ce_RuntimeException, 0,
+				"shared Fast store mapping lost");
+			return false;
+		}
+		return fast_map_sync_geometry(eng);
+	}
+
+	if (!eng->map || eng->map == MAP_FAILED) {
+		zend_throw_exception_ex(spl_ce_RuntimeException, 0,
+			"shared Fast store mapping lost");
+		return false;
+	}
+
+	if (fstat(eng->shm_fd, &st) != 0) {
+		fast_map_invalidate(eng);
+		zend_throw_exception_ex(spl_ce_RuntimeException, 0,
+			"shared Fast store mapping lost");
+		return false;
+	}
+
+	actual = (size_t)st.st_size;
+	if (actual <= eng->map_size || actual < FAST_HEADER) {
+		return true;
+	}
+
+	if (!fast_map_resize(eng, actual)) {
+		zend_throw_exception_ex(spl_ce_RuntimeException, 0,
+			"shared Fast store mapping lost while syncing segment size");
+		return false;
+	}
+	if (!fast_map_sync_geometry(eng)) {
+		zend_throw_exception_ex(spl_ce_RuntimeException, 0,
+			"shared Fast store header is corrupt after remap");
+		return false;
+	}
+	return true;
+}
+
+static bool fast_native_prepare(fast_native_t *eng)
+{
+	if (!eng) {
+		return false;
+	}
+	return fast_native_sync_map(eng);
+}
+
 static bool fast_map_grow(fast_native_t *eng, size_t need)
 {
 	if (need <= eng->map_size) {
@@ -655,56 +930,10 @@ static bool fast_map_grow(fast_native_t *eng, size_t need)
 	if (ftruncate(eng->shm_fd, (off_t)new_size) != 0) {
 		return false;
 	}
-	void *nm = mremap(eng->map, eng->map_size, new_size, MREMAP_MAYMOVE);
-	if (nm == MAP_FAILED) {
-		munmap(eng->map, eng->map_size);
-		nm = mmap(NULL, new_size, PROT_READ | PROT_WRITE, MAP_SHARED, eng->shm_fd, 0);
-		if (nm == MAP_FAILED) {
-			return false;
-		}
+	if (!fast_map_resize(eng, new_size)) {
+		return false;
 	}
-	eng->map = (char *)nm;
-	eng->map_size = new_size;
 	return true;
-}
-
-static void fast_native_sync_map(fast_native_t *eng)
-{
-	struct stat st;
-	uint32_t slots;
-
-	/* Remap when a peer grew the mmap arena (ftruncate in another process). */
-	if (eng->compat || eng->shm_fd < 0 || !eng->map || eng->map == MAP_FAILED) {
-		return;
-	}
-	if (fstat(eng->shm_fd, &st) != 0) {
-		return;
-	}
-	size_t actual = (size_t)st.st_size;
-	if (actual <= eng->map_size || actual < FAST_HEADER) {
-		return;
-	}
-	void *nm = mremap(eng->map, eng->map_size, actual, MREMAP_MAYMOVE);
-	if (nm == MAP_FAILED) {
-		munmap(eng->map, eng->map_size);
-		nm = mmap(NULL, actual, PROT_READ | PROT_WRITE, MAP_SHARED, eng->shm_fd, 0);
-		if (nm == MAP_FAILED) {
-			return;
-		}
-	}
-	eng->map = (char *)nm;
-	eng->map_size = actual;
-	slots = fast_ru32(eng->map, FAST_H_SLOTS);
-	if (slots < 1 || (slots & (slots - 1)) != 0) {
-		return;
-	}
-	eng->slot_count = slots;
-	eng->mask = slots - 1;
-	eng->order_bytes = fast_ru32(eng->map, FAST_H_ORDERSZ);
-	if (eng->order_bytes != FAST_ORDER && eng->order_bytes != FAST_ORDER_TAGGED) {
-		eng->order_bytes = FAST_ORDER;
-	}
-	eng->arena_base = fast_arena_base(eng->slot_count, eng->order_bytes);
 }
 
 static bool fast_name_hash(const char *name, size_t len, char out[16])
@@ -808,17 +1037,50 @@ static bool fast_probe(fast_native_t *eng, uint32_t base, zend_string *kb, zend_
 	return false;
 }
 
-static bool fast_alloc(fast_native_t *eng, uint32_t need, uint32_t *off_out)
+static bool fast_alloc(fast_native_t *eng, uint32_t need, uint32_t *off_out, uint32_t *cap_out)
 {
-	uint64_t frontier = fast_frontier_val(eng);
+	uint32_t ci, cap;
+	uint64_t frontier;
 	size_t limit = fast_alloc_limit(eng);
 
-	if (eng->compat && frontier + need > limit) {
+	fast_class_for_need(need, &ci, &cap);
+
+	/* Reuse size-class free blocks (Flat.php alloc). */
+	{
+		uint64_t head = fast_read_u64(eng->map, FAST_H_FREEHEADS + (size_t)ci * 8);
+
+		if (head != 0 && head >= (uint64_t)eng->arena_base && head < (uint64_t)eng->map_size) {
+			char *block = fast_rec_ptr(eng, (uint32_t)head);
+			uint64_t next = fast_read_u64(block, 0);
+
+			fast_wu64(eng->map, FAST_H_FREEHEADS + (size_t)ci * 8, next);
+			*off_out = (uint32_t)head;
+			*cap_out = cap;
+			return true;
+		}
+	}
+
+	frontier = fast_frontier_val(eng);
+	if (eng->compat && eng->payload > 0) {
+		uint64_t seg = frontier / eng->payload;
+		uint64_t seg_end = (seg + 1) * (uint64_t)eng->payload;
+
+		if (frontier + cap > seg_end) {
+			frontier = seg_end;
+			seg++;
+		}
+		if (seg != 0) {
+			zend_throw_exception(NULL, "shared Fast segment exhausted", 0);
+			return false;
+		}
+	}
+
+	if (eng->compat && frontier + cap > limit) {
 		zend_throw_exception(NULL, "shared Fast segment exhausted", 0);
 		return false;
 	}
-	if (frontier + need > eng->map_size) {
-		if (!eng->compat && !fast_map_grow(eng, (size_t)(frontier + need))) {
+	if (frontier + cap > eng->map_size) {
+		if (!eng->compat && !fast_map_grow(eng, (size_t)(frontier + cap))) {
 			zend_throw_exception(NULL, "shared Fast segment exhausted", 0);
 			return false;
 		}
@@ -828,15 +1090,50 @@ static bool fast_alloc(fast_native_t *eng, uint32_t need, uint32_t *off_out)
 		}
 	}
 	*off_out = (uint32_t)frontier;
-	fast_wu64(eng->map, FAST_H_FRONTIER, frontier + need);
+	*cap_out = cap;
+	fast_wu64(eng->map, FAST_H_FRONTIER, frontier + cap);
 	return true;
 }
 
-static void fast_append_order(fast_native_t *eng, uint32_t si, uint32_t gen)
+/* Parity: src/Engine/Flat.php compactOrder() — must hold writer lock. */
+static void fast_compact_order(fast_native_t *eng)
+{
+	uint32_t ob = eng->order_bytes;
+	uint32_t order_base = fast_order_base(eng->slot_count);
+	uint32_t oc = fast_ru32(eng->map, FAST_H_ORDER);
+	uint32_t w = 0;
+
+	for (uint32_t r = 0; r < oc; r++) {
+		uint32_t si = fast_ru32(eng->map, order_base + r * ob);
+		uint32_t gen = fast_ru32(eng->map, order_base + r * ob + 4);
+		const char *slot = eng->map + fast_dir_off(si);
+
+		if ((uint8_t)slot[22] != FAST_ST_LIVE || fast_ru32(slot, 12) != gen) {
+			continue;
+		}
+		if (w != r) {
+			memcpy(eng->map + order_base + (size_t)w * ob,
+				eng->map + order_base + (size_t)r * ob, ob);
+		}
+		w++;
+	}
+	fast_wu32(eng->map, FAST_H_ORDER, w);
+}
+
+static bool fast_append_order(fast_native_t *eng, uint32_t si, uint32_t gen)
 {
 	uint32_t oc = fast_ru32(eng->map, FAST_H_ORDER);
 	uint32_t ob = eng->order_bytes;
 	uint32_t order_base = fast_order_base(eng->slot_count);
+
+	if (oc >= eng->slot_count) {
+		fast_compact_order(eng);
+		oc = fast_ru32(eng->map, FAST_H_ORDER);
+	}
+	if (oc >= eng->slot_count) {
+		zend_throw_exception(NULL, "shared Fast order log is full", 0);
+		return false;
+	}
 
 	fast_wu32(eng->map, order_base + oc * ob, si);
 	fast_wu32(eng->map, order_base + oc * ob + 4, gen);
@@ -844,17 +1141,18 @@ static void fast_append_order(fast_native_t *eng, uint32_t si, uint32_t gen)
 		fast_wu64(eng->map, order_base + oc * ob + 8, (uint64_t)zend_hrtime());
 	}
 	fast_wu32(eng->map, FAST_H_ORDER, oc + 1);
+	return true;
 }
 
-static void fast_do_insert(fast_native_t *eng, uint32_t si, zend_string *hb, zend_string *hb2,
+static bool fast_do_insert(fast_native_t *eng, uint32_t si, zend_string *hb, zend_string *hb2,
 	zend_string *kb, zend_string *vb, uint8_t types)
 {
 	uint32_t kl = (uint32_t)ZSTR_LEN(kb);
 	uint32_t vl = (uint32_t)ZSTR_LEN(vb);
-	uint32_t off;
+	uint32_t off, cap;
 
-	if (!fast_alloc(eng, kl + vl, &off)) {
-		return;
+	if (!fast_alloc(eng, kl + vl, &off, &cap)) {
+		return false;
 	}
 
 	{
@@ -878,39 +1176,59 @@ static void fast_do_insert(fast_native_t *eng, uint32_t si, zend_string *hb, zen
 	memcpy(slot + 24, ZSTR_VAL(hb2), 8);
 	memcpy(eng->map + fast_dir_off(si), slot, FAST_SLOT);
 
+	fast_wu64(eng->map, FAST_H_LIVECAPS, fast_read_u64(eng->map, FAST_H_LIVECAPS) + cap);
 	fast_wu32(eng->map, FAST_H_LIVE, fast_ru32(eng->map, FAST_H_LIVE) + 1);
-	fast_append_order(eng, si, gen);
+	if (!fast_append_order(eng, si, gen)) {
+		return false;
+	}
+	return true;
 }
 
-static void fast_do_overwrite(fast_native_t *eng, uint32_t si, uint32_t rec_off, uint32_t kl,
+/* Overwrite parity: src/Engine/Flat.php doOverwrite() — preserve gen, no order append. */
+static bool fast_do_overwrite(fast_native_t *eng, uint32_t si, uint32_t rec_off, uint32_t kl,
 	uint32_t old_vl, uint32_t gen, zend_string *kb, zend_string *vb, uint8_t types)
 {
 	uint32_t vl = (uint32_t)ZSTR_LEN(vb);
-	if (vl <= old_vl) {
-		char *slot = eng->map + fast_dir_off(si);
+	uint32_t need = kl + vl;
+	uint32_t old_cap = fast_class_cap(kl + old_vl);
+	uint32_t need_cap = fast_class_cap(need);
 
-		fast_wu32(slot, 12, gen + 1);
-		memcpy(fast_rec_ptr(eng, rec_off) + kl, ZSTR_VAL(vb), vl);
-		fast_wu32(slot, 16, vl);
-		slot[23] = (char)types;
-		return;
-	}
-	uint32_t off;
-	if (!fast_alloc(eng, kl + vl, &off)) {
-		return;
-	}
-	{
-		char *rec = fast_rec_ptr(eng, off);
+	if (need <= old_cap && old_cap == need_cap) {
+		char *slot = eng->map + fast_dir_off(si);
+		char *rec = fast_rec_ptr(eng, rec_off);
+
 		memcpy(rec, ZSTR_VAL(kb), kl);
 		memcpy(rec + kl, ZSTR_VAL(vb), vl);
+		fast_wu32(slot, 16, vl);
+		slot[23] = (char)types;
+		return true;
 	}
-	char slot[FAST_SLOT];
-	memcpy(slot, eng->map + fast_dir_off(si), FAST_SLOT);
-	fast_wu32(slot, 12, gen + 1);
-	fast_wu32(slot, 8, off);
-	fast_wu32(slot, 16, vl);
-	slot[23] = (char)types;
-	memcpy(eng->map + fast_dir_off(si), slot, FAST_SLOT);
+	{
+		uint32_t off, cap;
+
+		if (!fast_alloc(eng, need, &off, &cap)) {
+			return false;
+		}
+		{
+			char *rec = fast_rec_ptr(eng, off);
+			memcpy(rec, ZSTR_VAL(kb), kl);
+			memcpy(rec + kl, ZSTR_VAL(vb), vl);
+		}
+		{
+			char slot[FAST_SLOT];
+
+			memcpy(slot, eng->map + fast_dir_off(si), FAST_SLOT);
+			fast_wu32(slot, 8, off);
+			fast_wu32(slot, 12, gen);
+			fast_wu32(slot, 16, vl);
+			slot[23] = (char)types;
+			memcpy(eng->map + fast_dir_off(si), slot, FAST_SLOT);
+		}
+		fast_free_block(eng, rec_off, old_cap);
+		fast_wu64(eng->map, FAST_H_LIVECAPS,
+			fast_read_u64(eng->map, FAST_H_LIVECAPS) + cap - old_cap);
+	}
+	return true;
 }
 
 /* ---- public API ---- */
@@ -935,7 +1253,7 @@ fast_native_t *fast_native_attach(
 	eng->mask = slots - 1;
 	eng->order_bytes = order_bytes;
 	eng->arena_base = fast_arena_base(slots, order_bytes);
-	eng->spin = FAST_SPIN;
+	eng->spin = fast_engine_lockfree_spin();
 	eng->shm_fd = -1;
 	eng->sem_id = -1;
 	eng->seg0_id = -1;
@@ -1164,59 +1482,85 @@ bool fast_native_get(fast_native_t *eng, zval *key, zval *value_out)
 	zend_string *kb, *hb, *hb2;
 	uint8_t kt;
 
-	fast_native_sync_map(eng);
+	fast_native_prepare(eng);
+	if (!eng->map || EG(exception)) {
+		return false;
+	}
 	if (!fast_key_norm(key, &kb, &hb, &hb2, &kt)) {
 		return false;
 	}
 	uint32_t base = fast_probe_base(hb) & eng->mask;
-	bool hit = false;
-	bool done = false;
+	uint32_t attempts = eng->spin > 0 ? eng->spin : 1;
 
 	/* Snapshot read: copy payload, confirm seq stable, then decode (all types).
-	 * Writers bump slot gen before overwriting bytes so probe can reject torn copies.
-	 * Spin exhaustion falls back to the same steps under the writer semaphore. */
-	for (uint32_t spin = 0; spin < eng->spin && !done; spin++) {
-		uint32_t s1 = fast_ru32(eng->map, FAST_H_SEQ);
+	 * Decode failure after a stable snapshot retries (torn igbinary), matching
+	 * Flat.php treating decode errors as torn reads. After spin attempts, one
+	 * locked pass uses the writer semaphore as the memory barrier. */
+	for (uint32_t attempt = 0; attempt < attempts + 1; attempt++) {
+		bool use_lock = (eng->spin == 0 || attempt >= eng->spin);
+		uint32_t s1, s2;
 		zend_string *payload = NULL;
 		uint8_t vtype = 0;
+		bool hit;
 
-		if (s1 & 1U) {
+		if (use_lock) {
+			fast_sem_lock(eng->sem_id);
+		}
+		s1 = fast_ru32(eng->map, FAST_H_SEQ);
+		if (!use_lock && (s1 & 1U)) {
+			if (use_lock) {
+				fast_sem_unlock(eng->sem_id);
+			}
 			continue;
 		}
 		hit = fast_probe(eng, base, kb, hb, hb2, true, &vtype, &payload);
-		{
-			uint32_t s2 = fast_ru32(eng->map, FAST_H_SEQ);
-			if (hit && payload && s1 == s2 && !(s2 & 1U)
-				&& fast_dec_value(vtype, payload, value_out)) {
-				done = true;
+		s2 = fast_ru32(eng->map, FAST_H_SEQ);
+		if (!use_lock && (s1 != s2 || (s2 & 1U))) {
+			if (payload) {
+				zend_string_release(payload);
 			}
+			if (use_lock) {
+				fast_sem_unlock(eng->sem_id);
+			}
+			continue;
+		}
+		if (!hit) {
+			if (payload) {
+				zend_string_release(payload);
+			}
+			if (use_lock) {
+				fast_sem_unlock(eng->sem_id);
+			}
+			zend_string_release(kb);
+			zend_string_release(hb);
+			zend_string_release(hb2);
+			return false;
+		}
+		if (!payload || !fast_dec_value(vtype, payload, value_out)) {
+			if (payload) {
+				zend_string_release(payload);
+			}
+			if (use_lock) {
+				fast_sem_unlock(eng->sem_id);
+			}
+			continue;
 		}
 		if (payload) {
 			zend_string_release(payload);
 		}
-		if (!done) {
-			hit = false;
+		if (use_lock) {
+			fast_sem_unlock(eng->sem_id);
 		}
-	}
-	if (!done) {
-		zend_string *payload = NULL;
-		uint8_t vtype = 0;
-
-		fast_sem_lock(eng->sem_id);
-		hit = fast_probe(eng, base, kb, hb, hb2, true, &vtype, &payload);
-		if (hit && payload) {
-			if (!fast_dec_value(vtype, payload, value_out)) {
-				hit = false;
-			}
-			zend_string_release(payload);
-		}
-		fast_sem_unlock(eng->sem_id);
+		zend_string_release(kb);
+		zend_string_release(hb);
+		zend_string_release(hb2);
+		return true;
 	}
 
 	zend_string_release(kb);
 	zend_string_release(hb);
 	zend_string_release(hb2);
-	return hit;
+	return false;
 }
 
 bool fast_native_has(fast_native_t *eng, zval *key)
@@ -1224,7 +1568,10 @@ bool fast_native_has(fast_native_t *eng, zval *key)
 	zend_string *kb, *hb, *hb2;
 	uint8_t kt, vtype = 0;
 
-	fast_native_sync_map(eng);
+	fast_native_prepare(eng);
+	if (!eng->map || EG(exception)) {
+		return false;
+	}
 	if (!fast_key_norm(key, &kb, &hb, &hb2, &kt)) {
 		return false;
 	}
@@ -1261,7 +1608,10 @@ void fast_native_set(fast_native_t *eng, zval *key, zval *value)
 	zend_string *kb, *hb, *hb2, *vb;
 	uint8_t kt, vt;
 
-	fast_native_sync_map(eng);
+	fast_native_prepare(eng);
+	if (!eng->map || EG(exception)) {
+		return;
+	}
 	if (!fast_key_norm(key, &kb, &hb, &hb2, &kt)) {
 		zend_throw_exception(NULL, "ext-fast: invalid key", 0);
 		return;
@@ -1281,7 +1631,8 @@ void fast_native_set(fast_native_t *eng, zval *key, zval *value)
 	fast_wu32(eng->map, FAST_H_SEQ, seq + 1);
 
 	int insert_slot = -1;
-	bool done = false;
+	bool write_ok = false;
+
 	for (uint32_t i = 0; i < eng->slot_count; i++) {
 		uint32_t si = (base + i) & eng->mask;
 		const char *slot = eng->map + fast_dir_off(si);
@@ -1290,8 +1641,10 @@ void fast_native_set(fast_native_t *eng, zval *key, zval *value)
 			if (insert_slot < 0) {
 				insert_slot = (int)si;
 			}
-			fast_do_insert(eng, (uint32_t)insert_slot, hb, hb2, kb, vb, types);
-			done = true;
+			if (!fast_do_insert(eng, (uint32_t)insert_slot, hb, hb2, kb, vb, types)) {
+				break;
+			}
+			write_ok = true;
 			break;
 		}
 		if (state == FAST_ST_TOMB) {
@@ -1304,12 +1657,14 @@ void fast_native_set(fast_native_t *eng, zval *key, zval *value)
 			uint32_t rec_off = fast_ru32(slot, 8);
 			uint32_t old_vl = fast_ru32(slot, 16);
 			uint32_t gen = fast_ru32(slot, 12);
-			fast_do_overwrite(eng, si, rec_off, (uint32_t)ZSTR_LEN(kb), old_vl, gen, kb, vb, types);
-			done = true;
+			if (!fast_do_overwrite(eng, si, rec_off, (uint32_t)ZSTR_LEN(kb), old_vl, gen, kb, vb, types)) {
+				break;
+			}
+			write_ok = true;
 			break;
 		}
 	}
-	if (!done) {
+	if (!write_ok && !EG(exception)) {
 		zend_throw_exception_ex(spl_ce_InvalidArgumentException, 0,
 			"shared Fast directory is full");
 	}
@@ -1327,7 +1682,10 @@ void fast_native_delete(fast_native_t *eng, zval *key)
 	zend_string *kb, *hb, *hb2;
 	uint8_t kt;
 
-	fast_native_sync_map(eng);
+	fast_native_prepare(eng);
+	if (!eng->map || EG(exception)) {
+		return;
+	}
 	if (!fast_key_norm(key, &kb, &hb, &hb2, &kt)) {
 		return;
 	}
@@ -1343,9 +1701,16 @@ void fast_native_delete(fast_native_t *eng, zval *key)
 		if ((uint8_t)slot[22] == FAST_ST_LIVE
 			&& memcmp(slot, ZSTR_VAL(hb), 8) == 0
 			&& memcmp(slot + 24, ZSTR_VAL(hb2), 8) == 0) {
+			uint32_t rec_off = fast_ru32(slot, 8);
+			uint32_t vallen = fast_ru32(slot, 16);
+			uint16_t keylen = (uint16_t)((uint8_t)slot[20] | ((uint16_t)(uint8_t)slot[21] << 8));
+			uint32_t cap = fast_class_cap(keylen + vallen);
+
 			slot[22] = (char)FAST_ST_TOMB;
 			fast_wu32(eng->map, FAST_H_LIVE, fast_ru32(eng->map, FAST_H_LIVE) - 1);
 			fast_wu32(eng->map, FAST_H_TOMB, fast_ru32(eng->map, FAST_H_TOMB) + 1);
+			fast_free_block(eng, rec_off, cap);
+			fast_wu64(eng->map, FAST_H_LIVECAPS, fast_read_u64(eng->map, FAST_H_LIVECAPS) - cap);
 			break;
 		}
 	}
@@ -1359,12 +1724,17 @@ void fast_native_delete(fast_native_t *eng, zval *key)
 
 zend_long fast_native_count(fast_native_t *eng)
 {
-	fast_native_sync_map(eng);
+	if (!fast_native_prepare(eng) || !eng->map) {
+		return 0;
+	}
 	return (zend_long)fast_ru32(eng->map, FAST_H_LIVE);
 }
 
 uint32_t fast_native_live_count(fast_native_t *eng)
 {
+	if (!eng || !eng->map || eng->map == MAP_FAILED) {
+		return 0;
+	}
 	return fast_ru32(eng->map, FAST_H_LIVE);
 }
 
@@ -1449,39 +1819,132 @@ bool fast_native_is_persistent(fast_native_t *eng)
 	return eng ? eng->persistent : false;
 }
 
-static bool fast_read_order_pos(fast_native_t *eng, uint32_t pos, zval *key_out, zval *val_out)
+#define FAST_ORDER_STALE  0
+#define FAST_ORDER_HIT    1
+#define FAST_ORDER_TORN  -1
+
+/* Snapshot one order-log position and decode from copies (Flat.php readOrderPos).
+ * Caller must hold seqlock stability or the writer semaphore. */
+static int fast_try_order_pos(fast_native_t *eng, uint32_t pos, zval *key_out, zval *val_out)
 {
 	uint32_t ob = eng->order_bytes;
 	uint32_t order_base = fast_order_base(eng->slot_count);
-	uint32_t si = fast_ru32(eng->map, order_base + pos * ob);
-	uint32_t gen = fast_ru32(eng->map, order_base + pos * ob + 4);
-	eng->iter_tag = ob == FAST_ORDER_TAGGED
-		? fast_read_u64(eng->map, order_base + pos * ob + 8)
-		: 0;
-	const char *slot = eng->map + fast_dir_off(si);
+	char entry[FAST_ORDER_TAGGED];
+	uint32_t si, gen, rec_off, vallen, slot_gen;
+	uint16_t keylen;
+	uint8_t types, kt, vt;
+	uint64_t tag = 0;
+	char slot[FAST_SLOT];
+	char *rec = NULL;
+	size_t rec_len;
+
+	memcpy(entry, eng->map + order_base + (size_t)pos * ob, ob);
+	si = fast_ru32(entry, 0);
+	gen = fast_ru32(entry, 4);
+	tag = ob == FAST_ORDER_TAGGED ? fast_read_u64(entry, 8) : 0;
+
+	memcpy(slot, eng->map + fast_dir_off(si), FAST_SLOT);
 	if ((uint8_t)slot[22] != FAST_ST_LIVE || fast_ru32(slot, 12) != gen) {
-		return false;
+		return FAST_ORDER_STALE;
 	}
-	uint32_t rec_off = fast_ru32(slot, 8);
-	uint32_t vallen = fast_ru32(slot, 16);
-	uint16_t keylen = (uint16_t)((uint8_t)slot[20] | ((uint16_t)(uint8_t)slot[21] << 8));
-	uint8_t types = (uint8_t)slot[23];
-	uint8_t kt = types >> 4;
-	uint8_t vt = types & 0xF;
+
+	rec_off = fast_ru32(slot, 8);
+	vallen = fast_ru32(slot, 16);
+	slot_gen = fast_ru32(slot, 12);
+	keylen = (uint16_t)((uint8_t)slot[20] | ((uint16_t)(uint8_t)slot[21] << 8));
+	types = (uint8_t)slot[23];
+	kt = types >> 4;
+	vt = types & 0xF;
+	rec_len = (size_t)keylen + (size_t)vallen;
+
+	if (rec_len > 0) {
+		rec = emalloc(rec_len);
+		memcpy(rec, fast_rec_ptr(eng, rec_off), rec_len);
+	}
+
+	{
+		const char *slot_live = eng->map + fast_dir_off(si);
+
+		if ((uint8_t)slot_live[22] != FAST_ST_LIVE
+			|| fast_ru32(slot_live, 12) != slot_gen
+			|| fast_ru32(slot_live, 8) != rec_off
+			|| fast_ru32(slot_live, 16) != vallen) {
+			if (rec) {
+				efree(rec);
+			}
+			return FAST_ORDER_TORN;
+		}
+	}
 
 	if (kt == 0) {
 		zend_long v = 0;
-		memcpy(&v, fast_rec_ptr(eng, rec_off), 8);
+
+		if (keylen >= 8 && rec) {
+			memcpy(&v, rec, 8);
+		}
 		ZVAL_LONG(key_out, v);
 	} else {
-		ZVAL_STRINGL(key_out, fast_rec_ptr(eng, rec_off), keylen);
+		ZVAL_STRINGL(key_out, rec ? rec : "", keylen);
 	}
-	zend_string *vb = vallen > 0
-		? zend_string_init(fast_rec_ptr(eng, rec_off) + keylen, vallen, 0)
-		: zend_string_init("", 0, 0);
-	fast_dec_value(vt, vb, val_out);
-	zend_string_release(vb);
-	return true;
+
+	{
+		zend_string *vb = vallen > 0
+			? zend_string_init(rec ? rec + keylen : "", vallen, 0)
+			: zend_string_init("", 0, 0);
+
+		if (!fast_dec_value(vt, vb, val_out)) {
+			zend_string_release(vb);
+			if (rec) {
+				efree(rec);
+			}
+			zval_ptr_dtor(key_out);
+			ZVAL_NULL(key_out);
+			return FAST_ORDER_TORN;
+		}
+		zend_string_release(vb);
+	}
+	if (rec) {
+		efree(rec);
+	}
+	eng->iter_tag = tag;
+	return FAST_ORDER_HIT;
+}
+
+/* Parity: Flat.php iterAdvance() — seqlock spin, sem fallback. */
+static bool fast_resolve_order_pos(fast_native_t *eng, uint32_t pos, zval *key_out, zval *val_out)
+{
+	int r;
+
+	for (uint32_t spin = 0; spin < eng->spin; spin++) {
+		uint32_t s1 = fast_ru32(eng->map, FAST_H_SEQ);
+
+		if (s1 & 1U) {
+			continue;
+		}
+		r = fast_try_order_pos(eng, pos, key_out, val_out);
+		{
+			uint32_t s2 = fast_ru32(eng->map, FAST_H_SEQ);
+
+			if (s1 != s2 || (s2 & 1U)) {
+				if (r == FAST_ORDER_HIT) {
+					zval_ptr_dtor(key_out);
+					zval_ptr_dtor(val_out);
+					ZVAL_NULL(key_out);
+					ZVAL_NULL(val_out);
+				}
+				continue;
+			}
+		}
+		if (r == FAST_ORDER_TORN) {
+			continue;
+		}
+		return r == FAST_ORDER_HIT;
+	}
+
+	fast_sem_lock(eng->sem_id);
+	r = fast_try_order_pos(eng, pos, key_out, val_out);
+	fast_sem_unlock(eng->sem_id);
+	return r == FAST_ORDER_HIT;
 }
 
 static void fast_iter_advance(fast_native_t *eng)
@@ -1492,10 +1955,14 @@ static void fast_iter_advance(fast_native_t *eng)
 	ZVAL_NULL(&eng->iter_val);
 	eng->iter_ready = false;
 
+	if (!fast_native_prepare(eng) || !eng->map) {
+		return;
+	}
 	uint32_t order_count = fast_ru32(eng->map, FAST_H_ORDER);
 	while (eng->iter_pos < order_count) {
 		zval k, v;
-		if (fast_read_order_pos(eng, eng->iter_pos, &k, &v)) {
+
+		if (fast_resolve_order_pos(eng, eng->iter_pos, &k, &v)) {
 			ZVAL_COPY_VALUE(&eng->iter_key, &k);
 			ZVAL_COPY_VALUE(&eng->iter_val, &v);
 			eng->iter_ready = true;
@@ -1551,16 +2018,21 @@ void fast_native_seek(fast_native_t *eng, zend_long pos)
 
 	eng->iter_pos = 0;
 	zend_long idx = -1;
-	uint32_t order_count = fast_ru32(eng->map, FAST_H_ORDER);
 	zval_ptr_dtor(&eng->iter_key);
 	zval_ptr_dtor(&eng->iter_val);
 	ZVAL_NULL(&eng->iter_key);
 	ZVAL_NULL(&eng->iter_val);
 	eng->iter_ready = false;
 
+	if (!fast_native_prepare(eng) || !eng->map) {
+		return;
+	}
+	uint32_t order_count = fast_ru32(eng->map, FAST_H_ORDER);
+
 	while (eng->iter_pos < order_count) {
 		zval k, v;
-		if (fast_read_order_pos(eng, eng->iter_pos, &k, &v)) {
+
+		if (fast_resolve_order_pos(eng, eng->iter_pos, &k, &v)) {
 			idx++;
 			if (idx == pos) {
 				ZVAL_COPY_VALUE(&eng->iter_key, &k);
@@ -1610,6 +2082,9 @@ bool fast_engine_name_hash_match(fast_native_t *eng, const char *name, size_t le
 
 void fast_engine_adopt_geometry(fast_native_t *eng)
 {
+	if (!fast_native_prepare(eng) || !eng->map) {
+		return;
+	}
 	eng->slot_count = fast_ru32(eng->map, FAST_H_SLOTS);
 	eng->mask = eng->slot_count - 1;
 	eng->order_bytes = fast_ru32(eng->map, FAST_H_ORDERSZ);

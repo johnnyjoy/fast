@@ -40,6 +40,8 @@ $skip = [
     'perf_track_gate.php',
     'stress_gate.php',
     'interop_worker.php',
+    'interop_native_worker.php',
+    'cross_engine_gate.php',
 ];
 
 /** @var list<string> run only with FAST_BACKEND=ext */
@@ -48,6 +50,8 @@ $extOnly = [
     'ext_compat_smoke.php',
     'ext_striped_smoke.php',
     'interop_php_ext.php',
+    'interop_native_ext.php',
+    'striped_order_churn.php',
 ];
 
 foreach ($files as $file) {
