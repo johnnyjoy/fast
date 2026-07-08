@@ -989,7 +989,7 @@ final class Flat implements Engine
             case self::TYPE_INT: return \unpack('q', $b)[1];
             case self::TYPE_FLOAT: return \unpack('e', $b)[1];
             case self::TYPE_STRING: return $b;
-            default: return \igbinary_unserialize($b);
+            default: return @\igbinary_unserialize($b);
         }
     }
 

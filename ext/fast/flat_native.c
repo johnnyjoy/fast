@@ -199,6 +199,9 @@ static bool fast_igbinary_encode(zval *value, zend_string **out)
 
 static bool fast_igbinary_decode(zend_string *data, zval *out)
 {
+	zend_long old_er;
+	int rc;
+
 	/* igbinary header is 4 bytes: 0x00 0x00 0x00 0x01|0x02 (big-endian version). */
 	if (ZSTR_LEN(data) < 4) {
 		return false;
@@ -210,7 +213,16 @@ static bool fast_igbinary_decode(zend_string *data, zval *out)
 			return false;
 		}
 	}
-	if (igbinary_unserialize((const uint8_t *)ZSTR_VAL(data), ZSTR_LEN(data), out) != 0) {
+	/* Torn lock-free reads may pass stable seq with corrupt payload; callers retry.
+	 * Suppress igbinary warnings — they are expected on that path (Flat.php probe catch). */
+	old_er = EG(error_reporting);
+	EG(error_reporting) = 0;
+	ZVAL_UNDEF(out);
+	rc = igbinary_unserialize((const uint8_t *)ZSTR_VAL(data), ZSTR_LEN(data), out);
+	EG(error_reporting) = old_er;
+	if (rc != 0) {
+		zval_ptr_dtor(out);
+		ZVAL_UNDEF(out);
 		return false;
 	}
 	return true;
