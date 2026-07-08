@@ -75,4 +75,6 @@ bool fast_engine_is_sole_connection(fast_native_t *eng);
 
 bool fast_native_destroy_store_force(fast_native_t *eng);
 
+void fast_native_compact(fast_native_t *eng);
+
 #endif

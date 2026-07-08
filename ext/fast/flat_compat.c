@@ -151,6 +151,7 @@ fast_native_t *fast_compat_attach(
 	eng->mask = slots - 1;
 	eng->order_bytes = order_bytes;
 	eng->arena_base = FAST_HEADER + slots * (FAST_SLOT + order_bytes);
+	eng->initial_size = size;
 	eng->spin = fast_engine_lockfree_spin();
 	eng->shm_fd = -1;
 	eng->seg0_id = -1;

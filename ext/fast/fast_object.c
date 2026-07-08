@@ -1521,7 +1521,9 @@ PHP_METHOD(Fast, compact)
 		return;
 	}
 	fast_flush_pending(obj);
-	/* Shared compaction is a no-op today (see shared_compact_accepted.php). */
+	if (obj->kind == FAST_ENGINE_NATIVE && obj->store.native) {
+		fast_native_compact(obj->store.native);
+	}
 }
 
 PHP_METHOD(Fast, stats)

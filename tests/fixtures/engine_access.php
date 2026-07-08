@@ -33,7 +33,6 @@ function fast_test_stats(Fast $store): array
     static $method = null;
     if ($method === null) {
         $method = new \ReflectionMethod(\Fast::class, 'stats');
-        $method->setAccessible(true);
     }
 
     /** @var array<string,mixed> $stats */
@@ -78,10 +77,61 @@ function fast_test_compact(Fast $store): void
     static $method = null;
     if ($method === null) {
         $method = new \ReflectionMethod(\Fast::class, 'compact');
-        $method->setAccessible(true);
     }
 
     $method->invoke($store);
+}
+
+/** Header offset H_FRONTIER (arena bump pointer). */
+const FAST_TEST_H_FRONTIER = 24;
+
+/**
+ * Raw arena frontier from the backing store (test-only shrink / compaction gate).
+ */
+function fast_test_frontier(string $name): ?int
+{
+    if (\extension_loaded('fast')) {
+        $path = fast_test_native_shm_file($name);
+        if (!\is_readable($path)) {
+            return null;
+        }
+        $raw = @\file_get_contents($path, false, null, FAST_TEST_H_FRONTIER, 8);
+        if ($raw === false || \strlen($raw) < 8) {
+            return null;
+        }
+
+        return (int) \unpack('P', $raw)[1];
+    }
+
+    $seg = @\shmop_open(Flat::segKey($name, 0), 'a', 0, 0);
+    if ($seg === false) {
+        return null;
+    }
+
+    return (int) \unpack('P', \shmop_read($seg, FAST_TEST_H_FRONTIER, 8))[1];
+}
+
+/**
+ * Backing file size for ext-native mmap stores (Linux: /dev/shm + path).
+ */
+function fast_test_native_shm_size(string $name): ?int
+{
+    if (!\extension_loaded('fast')) {
+        return null;
+    }
+
+    $path = fast_test_native_shm_file($name);
+    if (!\is_readable($path)) {
+        return null;
+    }
+
+    \clearstatcache(true, $path);
+    $size = @\filesize($path);
+    if ($size === false) {
+        return null;
+    }
+
+    return $size;
 }
 
 /**

@@ -16,9 +16,9 @@ use \Fast;
 /**
  * compact() is internal maintenance, not public Fast contract (it is reached here
  * only via the test-only fast_test_compact() helper). It must never fail merely
- * because the store is shared, and it must preserve every live entry. Bounded
- * incremental shrink of the shared arena is future engine work, so today shared
- * compaction is a no-op — this test pins that minimum acceptable behavior.
+ * because the store is shared, and it must preserve every live entry. After
+ * compaction the arena may shrink when this process is the sole owner (see
+ * shared_arena_shrink.php).
  */
 
 $fail = static function (string $message): never {

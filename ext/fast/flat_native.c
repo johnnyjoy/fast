@@ -1132,6 +1132,206 @@ static void fast_compact_order(fast_native_t *eng)
 	fast_wu32(eng->map, FAST_H_ORDER, w);
 }
 
+static inline uint32_t fast_native_payload(fast_native_t *eng)
+{
+	if (eng->compat) {
+		return eng->payload;
+	}
+	return eng->initial_size > FAST_HEADER ? eng->initial_size - FAST_HEADER : 0;
+}
+
+static bool fast_engine_is_sole_connection_locked(fast_native_t *eng)
+{
+	FILE *fp = NULL;
+	bool sole;
+
+	{
+		zval *fpzv = zend_hash_str_find(&fast_link_fps, eng->name, strlen(eng->name));
+		if (fpzv) {
+			fp = (FILE *)Z_PTR_P(fpzv);
+			if (fp) {
+				flock(fileno(fp), LOCK_UN);
+			}
+		}
+	}
+	sole = fast_store_unreferenced(eng);
+	if (fp) {
+		flock(fileno(fp), LOCK_SH);
+	}
+	return sole;
+}
+
+static void fast_reclaim_mmap(fast_native_t *eng)
+{
+	size_t frontier, new_size, page;
+
+	if (!eng || eng->compat || eng->shm_fd < 0 || !eng->map || eng->map == MAP_FAILED) {
+		return;
+	}
+	if (!fast_engine_is_sole_connection_locked(eng)) {
+		return;
+	}
+
+	frontier = (size_t)fast_frontier_val(eng);
+	new_size = frontier;
+	if (new_size < eng->initial_size) {
+		new_size = eng->initial_size;
+	}
+	page = (size_t)sysconf(_SC_PAGESIZE);
+	if (page > 1) {
+		new_size = (new_size + page - 1) & ~(page - 1);
+	}
+	if (new_size < FAST_HEADER) {
+		new_size = FAST_HEADER;
+	}
+	if (new_size >= eng->map_size) {
+		return;
+	}
+	if (ftruncate(eng->shm_fd, (off_t)new_size) != 0) {
+		return;
+	}
+	(void)fast_map_resize(eng, new_size);
+}
+
+/* Parity: src/Engine/Flat.php compactArena() — must hold writer lock. */
+static void fast_compact_arena(fast_native_t *eng)
+{
+	uint32_t order_base = fast_order_base(eng->slot_count);
+	uint32_t ob = eng->order_bytes;
+	bool tagged = ob == FAST_ORDER_TAGGED;
+	uint32_t oc = fast_ru32(eng->map, FAST_H_ORDER);
+	uint32_t seq;
+	uint32_t live_n = 0;
+	uint32_t live_alloc = 0;
+	struct {
+		uint32_t si;
+		uint32_t gen;
+		uint32_t cap;
+		uint32_t total;
+		uint64_t tag;
+		unsigned char *bytes;
+	} *live = NULL;
+	uint32_t cursor_start;
+	uint64_t cursor;
+	uint64_t live_caps;
+	uint32_t w;
+	uint32_t payload = fast_native_payload(eng);
+
+	cursor_start = eng->compat ? fast_region_arena_base(eng) : eng->arena_base;
+
+	for (uint32_t r = 0; r < oc; r++) {
+		uint32_t si = fast_ru32(eng->map, order_base + r * ob);
+		uint32_t gen = fast_ru32(eng->map, order_base + r * ob + 4);
+		uint64_t tag = tagged ? fast_read_u64(eng->map, order_base + r * ob + 8) : 0;
+		char *slot = eng->map + fast_dir_off(si);
+		uint32_t rec_off;
+		uint32_t vallen;
+		uint16_t keylen;
+		uint32_t total;
+		uint32_t cap;
+
+		if ((uint8_t)slot[22] != FAST_ST_LIVE) {
+			continue;
+		}
+		if (fast_ru32(slot, 12) != gen) {
+			continue;
+		}
+		rec_off = fast_ru32(slot, 8);
+		vallen = fast_ru32(slot, 16);
+		keylen = (uint16_t)((uint8_t)slot[20] | ((uint16_t)(uint8_t)slot[21] << 8));
+		total = keylen + vallen;
+		cap = fast_class_cap(total);
+
+		if (live_n >= live_alloc) {
+			live_alloc = live_alloc ? live_alloc * 2 : 16;
+			live = erealloc(live, live_alloc * sizeof(*live));
+		}
+		live[live_n].si = si;
+		live[live_n].gen = gen;
+		live[live_n].cap = cap;
+		live[live_n].total = total;
+		live[live_n].tag = tag;
+		live[live_n].bytes = emalloc(total);
+		memcpy(live[live_n].bytes, fast_rec_ptr(eng, rec_off), total);
+		live_n++;
+	}
+
+	seq = fast_ru32(eng->map, FAST_H_SEQ);
+	fast_wu32(eng->map, FAST_H_SEQ, seq + 1);
+
+	cursor = cursor_start;
+	w = 0;
+	live_caps = 0;
+	for (uint32_t i = 0; i < live_n; i++) {
+		if (eng->compat && payload > 0) {
+			uint64_t seg_end = ((cursor / payload) + 1) * payload;
+
+			if (cursor + live[i].cap > seg_end) {
+				cursor = seg_end;
+			}
+		}
+		memcpy(fast_rec_ptr(eng, (uint32_t)cursor), live[i].bytes, live[i].total);
+		fast_wu32(eng->map + fast_dir_off(live[i].si), 8, (uint32_t)cursor);
+		fast_wu32(eng->map, order_base + w * ob, live[i].si);
+		fast_wu32(eng->map, order_base + w * ob + 4, live[i].gen);
+		if (tagged) {
+			fast_wu64(eng->map, order_base + w * ob + 8, live[i].tag);
+		}
+		w++;
+		cursor += live[i].cap;
+		live_caps += live[i].cap;
+	}
+
+	fast_wu32(eng->map, FAST_H_ORDER, w);
+	fast_wu64(eng->map, FAST_H_FRONTIER, cursor);
+	fast_wu64(eng->map, FAST_H_LIVECAPS, live_caps);
+	memset(eng->map + FAST_H_FREEHEADS, 0, FAST_FREE_CLASSES * 8);
+	fast_wu32(eng->map, FAST_H_SEQ, seq + 2);
+
+	for (uint32_t i = 0; i < live_n; i++) {
+		efree(live[i].bytes);
+	}
+	if (live) {
+		efree(live);
+	}
+
+	fast_reclaim_mmap(eng);
+}
+
+/* Parity: src/Engine/Flat.php maybeCompact() — must hold writer lock; seq closed. */
+static void fast_maybe_compact(fast_native_t *eng)
+{
+	uint32_t payload = fast_native_payload(eng);
+	uint64_t frontier;
+	uint64_t arena_used;
+	uint64_t live_caps;
+
+	if (payload == 0) {
+		return;
+	}
+	if (eng->dirty_bytes < payload) {
+		return;
+	}
+	eng->dirty_bytes = 0;
+
+	if (eng->compat) {
+		frontier = fast_frontier_val(eng);
+		if (frontier <= payload) {
+			return;
+		}
+	} else if (eng->map_size <= eng->initial_size) {
+		return;
+	}
+
+	frontier = fast_frontier_val(eng);
+	arena_used = frontier - (eng->compat ? fast_region_arena_base(eng) : eng->arena_base);
+	live_caps = fast_read_u64(eng->map, FAST_H_LIVECAPS);
+	if (arena_used < 2 * (uint64_t)(live_caps >= FAST_ALLOC_MIN ? live_caps : FAST_ALLOC_MIN)) {
+		return;
+	}
+	fast_compact_arena(eng);
+}
+
 static bool fast_append_order(fast_native_t *eng, uint32_t si, uint32_t gen)
 {
 	uint32_t oc = fast_ru32(eng->map, FAST_H_ORDER);
@@ -1189,6 +1389,7 @@ static bool fast_do_insert(fast_native_t *eng, uint32_t si, zend_string *hb, zen
 	memcpy(eng->map + fast_dir_off(si), slot, FAST_SLOT);
 
 	fast_wu64(eng->map, FAST_H_LIVECAPS, fast_read_u64(eng->map, FAST_H_LIVECAPS) + cap);
+	eng->dirty_bytes += cap;
 	fast_wu32(eng->map, FAST_H_LIVE, fast_ru32(eng->map, FAST_H_LIVE) + 1);
 	if (!fast_append_order(eng, si, gen)) {
 		return false;
@@ -1239,6 +1440,7 @@ static bool fast_do_overwrite(fast_native_t *eng, uint32_t si, uint32_t rec_off,
 		fast_free_block(eng, rec_off, old_cap);
 		fast_wu64(eng->map, FAST_H_LIVECAPS,
 			fast_read_u64(eng->map, FAST_H_LIVECAPS) + cap - old_cap);
+		eng->dirty_bytes += cap + old_cap;
 	}
 	return true;
 }
@@ -1265,6 +1467,7 @@ fast_native_t *fast_native_attach(
 	eng->mask = slots - 1;
 	eng->order_bytes = order_bytes;
 	eng->arena_base = fast_arena_base(slots, order_bytes);
+	eng->initial_size = size;
 	eng->spin = fast_engine_lockfree_spin();
 	eng->shm_fd = -1;
 	eng->sem_id = -1;
@@ -1681,6 +1884,9 @@ void fast_native_set(fast_native_t *eng, zval *key, zval *value)
 			"shared Fast directory is full");
 	}
 	fast_wu32(eng->map, FAST_H_SEQ, seq + 2);
+	if (write_ok) {
+		fast_maybe_compact(eng);
+	}
 	fast_sem_unlock(eng->sem_id);
 
 	zend_string_release(kb);
@@ -1723,10 +1929,12 @@ void fast_native_delete(fast_native_t *eng, zval *key)
 			fast_wu32(eng->map, FAST_H_TOMB, fast_ru32(eng->map, FAST_H_TOMB) + 1);
 			fast_free_block(eng, rec_off, cap);
 			fast_wu64(eng->map, FAST_H_LIVECAPS, fast_read_u64(eng->map, FAST_H_LIVECAPS) - cap);
+			eng->dirty_bytes += cap;
 			break;
 		}
 	}
 	fast_wu32(eng->map, FAST_H_SEQ, seq + 2);
+	fast_maybe_compact(eng);
 	fast_sem_unlock(eng->sem_id);
 
 	zend_string_release(kb);
@@ -1802,6 +2010,16 @@ void fast_native_lock(fast_native_t *eng)
 	if (eng) {
 		fast_sem_lock(eng->sem_id);
 	}
+}
+
+void fast_native_compact(fast_native_t *eng)
+{
+	if (!fast_native_prepare(eng) || !eng->map || eng->map == MAP_FAILED) {
+		return;
+	}
+	fast_sem_lock(eng->sem_id);
+	fast_compact_arena(eng);
+	fast_sem_unlock(eng->sem_id);
 }
 
 void fast_native_unlock(fast_native_t *eng)

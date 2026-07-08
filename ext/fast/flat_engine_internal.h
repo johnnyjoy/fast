@@ -32,6 +32,8 @@ struct fast_native_s {
 	int store_key;
 	int seg0_id;
 	uint32_t payload;
+	uint32_t initial_size;
+	uint32_t dirty_bytes;
 	uint32_t iter_pos;
 	uint64_t iter_tag;
 	zval iter_key;
