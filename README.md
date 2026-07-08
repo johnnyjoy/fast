@@ -96,6 +96,10 @@ composer lint          # PHPDoc on public API (src/)
 php tests/stress_100k_bench.php   # 100k-key stress (integrity + throughput)
 ```
 
+## Acknowledgments
+
+Portions of this codebase were developed and edited with assistance from [Cursor AI](https://cursor.com).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
